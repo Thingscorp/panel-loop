@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""pl-judges: print the judges that are switched on, one per line.
+
+    pl-judges            # enabled judges
+    pl-judges --all      # every judge with its switch: "<name>\\ton|off"
+
+Switches come from judges.conf / env / config (see README "Switching judges").
+Exit 78 if every judge is off.
+"""
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pl_common import core, parser, run  # noqa: E402
+
+
+def main(argv):
+    ap = parser("pl-judges", "List enabled judges.")
+    ap.add_argument("--all", action="store_true", help="list every judge with on/off")
+    ap.add_argument("--config", default=None, help="config file (default ~/.config/clef-decide/config)")
+    args = ap.parse_args(argv)
+    if args.verbose:
+        os.environ[core.DEBUG_ENV] = "1"
+    sw = core.judge_switches(args.config)
+    if args.all:
+        for j in core.JUDGES:
+            print(f"{j}\t{'on' if sw[j] else 'off'}")
+        return core.EXIT_OK
+    on = [j for j in core.JUDGES if sw[j]]
+    if not on:
+        raise core.ClefError("every judge is switched off", code=core.EXIT_CONFIG,
+                             fix="set at least one <name>=true in judges.conf")
+    print("\n".join(on))
+    return core.EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(run("pl-judges", main, sys.argv[1:]))

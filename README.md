@@ -8,7 +8,7 @@ The rule of the loop: **the agent is the hands, the panel is the judge.** No gat
 
 ## Verified claims
 
-Every claim below is backed by a test in `tests/` — fully mocked, no network, no key, no charges. Run them yourself: `python3 -m unittest discover -s tests` (72/72 pass, ~0.1s).
+Every claim below is backed by a test in `tests/` — fully mocked, no network, no key, no charges. Run them yourself: `python3 -m unittest discover -s tests` (115/115 pass, ~1.5s).
 
 | Claim | Backing data |
 |---|---|
@@ -66,7 +66,7 @@ Only `clef`, `clef-flash`, and `jev-latest` (plus a `:free` suffix spelling, pre
 bin/clef-decide --state-file report.md --questions done.json --panel
 ```
 
-`done.json` must hold exactly one choice question, e.g. `{"done": {"type": "choice", "instructions": "...", "criteria": {"done": "...", "not_done": "..."}}}`. Use the panel for the loop-termination gate (phase 6) and other high-stakes verdicts; routine gates stay single-judge. `--panel` cannot be combined with `--judge` or `--model` — it always uses all four judges, and contradictory flags fail loudly instead of being silently ignored.
+`done.json` must hold exactly one choice question, e.g. `{"done": {"type": "choice", "instructions": "...", "criteria": {"done": "...", "not_done": "..."}}}`. Use the panel for the loop-termination gate (phase 6) and other high-stakes verdicts; routine gates stay single-judge. `--panel` cannot be combined with `--judge` or `--model` — it always uses every judge that is switched on (all four by default; see [Switching judges](#switching-judges-on-and-off)), and contradictory flags fail loudly instead of being silently ignored.
 
 ### Skeleton-of-judgment
 
@@ -84,6 +84,150 @@ bin/clef-decide --sot --state-file report.md --skeleton-file skeleton.json --goa
 - A failing point names itself: `[skeleton:<point_id>] <error>`.
 
 Use `--sot` when a gate's evidence is too large for one request's context budget, or when the sub-judgments are genuinely independent and deserve the full state each. When the questions fit one request and share evidence, the plain batched form is cheaper (fewer requests).
+
+## Pipeline (composable stages)
+
+`clef-decide` stays the one-shot front door. Underneath, the same work is
+available as small single-purpose programs that talk JSONL on stdin/stdout,
+so gates can be composed in a shell, sharded across processes, and resumed
+after a crash. Every stage reuses the core in `bin/clef-decide` — same
+validation, same routes, same key chain, same no-retry POST, same tribunal
+rule — so the Clef API contract lives in exactly one place.
+
+| Stage | Does one thing | stdin → stdout | Network |
+|---|---|---|---|
+| `pl-judges` | lists the judges that are switched on | — → one name per line | no |
+| `pl-split` | turns a state + questions file into requests; validates bounds and the 16,384-token budget up front | files → request JSONL | no |
+| `pl-ask` | sends each request once to its judge's native route | request JSONL → result JSONL | **yes** (the only stage that is) |
+| `pl-aggregate` | joins skeleton verdicts into the goal request (the `--sot` join) | result JSONL → request JSONL | no |
+| `pl-tally` | one judge, one vote, majority wins; exit 2 on a tie | result JSONL → verdict JSON | no |
+| `pl-render` | prints the same human summary as `clef-decide` | result JSONL → text | no |
+
+### Stream formats
+
+Request (one per line):
+
+```json
+{"id": "risk", "judge": "jev", "model": null, "round": 1, "state": "...", "questions": {"risk": {"type": "score", "...": "..."}}}
+```
+
+Result (one per request, **in input order** even with `--jobs`):
+
+```json
+{"id": "risk", "judge": "jev", "model": null, "round": 1, "key": "<sha256>", "ok": true, "answers": {"risk": {"...": "..."}}, "usage": {"...": "..."}, "cached": false}
+{"id": "fix", "judge": "clef", "ok": false, "error": {"error": "[fix:clef] HTTP 429 from ...", "exit": 75, "status": 429, "stage": "pl-ask", "judge": "clef", "endpoint": "...", "cause": "...", "fix": "..."}}
+```
+
+Failed requests still produce a result line, so downstream stages see
+exactly what failed; `pl-aggregate` and `pl-tally` refuse partial input
+rather than judging on a subset.
+
+### Composing
+
+```bash
+# Plain gate (same as clef-decide --questions q.json --judge jev)
+pl-split --state-file s.md --questions q.json --batch --judge jev | pl-ask | pl-render
+
+# Skeleton-of-judgment (same as clef-decide --sot)
+pl-split --state-file s.md --questions skeleton.json \
+  | pl-ask --jobs 8 \
+  | pl-aggregate --state-file s.md --goal-file goal.json \
+  | pl-ask | pl-render
+
+# Tribunal (same as clef-decide --panel), with the tie re-run made explicit
+vote() { pl-split --state-file r.md --questions done.json --per-judge --round "$1" | pl-ask --jobs 4 | pl-tally; }
+vote 1 || { [ $? -eq 2 ] && vote 2; }   # second tie (exit 2) → escalate to the owner
+
+# Skeleton + tribunal verdict (same as --sot --final-panel)
+pl-split --state-file s.md --questions skeleton.json | pl-ask -P 8 \
+  | pl-aggregate --state-file s.md --goal-file goal.json --per-judge | pl-ask -P 4 | pl-tally
+```
+
+### Scaling and resuming
+
+- **Parallel:** `pl-ask --jobs N` (alias `-P`) runs N requests at once; output order is still input order.
+- **Sharding:** `pl-ask --shard I/N` handles only lines where `index % N == I`. Run N copies (separate processes, `xargs -P`, or machines) over the same request stream and `cat` the results:
+  ```bash
+  pl-split --state-file s.md --questions risk.json > reqs.jsonl
+  seq 0 3 | xargs -P 4 -I{} sh -c 'pl-ask --shard {}/4 --state-dir .pl-state < reqs.jsonl > out.{}.jsonl'
+  cat out.*.jsonl | pl-render
+  ```
+- **Resumable, idempotent state:** `--state-dir DIR` (or `$PANEL_LOOP_STATE_DIR`) stores each *successful* result as `DIR/<key>.json`, written atomically (temp file + rename). The key is a SHA-256 of judge, model, round, state, and questions — never the API key. Re-running the same pipeline skips cached keys, so a crash halfway through a 32-point skeleton does not re-send (or re-pay for) the points that already succeeded. Failures are not cached.
+- **No hidden retries.** Resuming is an explicit re-run you choose; `pl-ask` never re-sends on its own (the core rule: an unknown outcome may already be charged). A timeout is reported, not retried — re-running it may charge twice.
+- `--round` is part of the cache key on purpose: the panel's tie re-run is a *new vote*, so it must not be served from cache.
+- Keep concurrency modest: these are metered production endpoints, and HTTP 429 exits 75. There is no built-in load test, and you should not point one at the live service.
+
+Design sources: the single-request-per-point fan-out is the existing `--sot`
+design; the majority rule and tie handling are the existing `--panel`
+tribunal rule (`tally()` is now shared by both); "no retries, no idempotency
+key" and the budget/bounds checks are the existing hard rules. The stages
+only make those steps separately runnable.
+
+## Switching judges on and off
+
+Each judge has an on/off switch; no code change is needed. `judges.conf` at
+the repo root ships with all four on:
+
+```ini
+clef=true
+clef-flash=true
+jev=true
+luna=true
+```
+
+First source found wins, per judge:
+
+1. `$PANEL_LOOP_JUDGE_<NAME>` — e.g. `PANEL_LOOP_JUDGE_LUNA=false`, `PANEL_LOOP_JUDGE_CLEF_FLASH=off`
+2. `judge.<name>=` in `~/.config/clef-decide/config` — e.g. `judge.jev=false`
+3. `<name>=` in `judges.conf` (or the file named by `$PANEL_LOOP_JUDGES_FILE`)
+4. on
+
+Accepted values: `true/false`, `on/off`, `yes/no`, `1/0`; anything else exits 78.
+`pl-judges --all` shows the effective switches.
+
+Effects: `--judge X` (and `pl-ask` requests for X) on a switched-off judge
+fail before any request is sent (exit 78, with the switch to flip in the
+message). `--panel`, `--final-panel`, and `pl-split --per-judge` vote with
+the judges that are on — still one judge, one vote, majority wins. With an
+even number of judges on, ties are likelier; the tie rule is unchanged.
+
+## Errors and exit codes
+
+Every stage writes errors to stderr as a human line, a `fix:` line, and one
+JSON line you can parse:
+
+```
+clef-decide: [jev] HTTP 401 from https://api.experientiallabs.ai/v1/systemone: ...
+clef-decide: fix: check CLEF_API_KEY / EXPLABS_API_KEY and that the key has access to the model
+{"cause": "API key missing, invalid, or not allowed for this model", "endpoint": "https://api.experientiallabs.ai/v1/systemone", "error": "[jev] HTTP 401 from ...", "exit": 77, "fix": "...", "judge": "jev", "model": "jev-latest", "stage": "panel", "status": 401}
+```
+
+Fields: `stage`, `judge`, `model`, `status` (HTTP), `endpoint`, `cause`
+(likely cause), `fix` (suggested fix), `exit`. Fields that don't apply are
+omitted. Panel and skeleton errors keep the existing `[judge]` /
+`[skeleton:<id>]` prefixes.
+
+`--verbose` / `-v` on any stage (or `PANEL_LOOP_DEBUG=1`, which `--verbose`
+also passes to child stages) prints `debug:` lines: judge, route, model,
+question IDs, endpoint, request size, cache hits. The key is never printed.
+
+| Exit | Meaning | Typical cause | What to do |
+|---|---|---|---|
+| 0 | success / panel has a winner | — | — |
+| 1 | internal error | bug in the helper | run with `--verbose`, file a bug |
+| 2 | **panel tie — escalate** (unchanged) | judges split twice | re-run once (`--round 2`), then escalate to the owner; never auto-pick |
+| 64 | usage | unknown or contradictory flags (`--panel --judge`, `--sot --questions`) | see `--help` |
+| 65 | data | invalid questions, bounds, over the 16,384-token budget, bad JSON, HTTP 400/422, partial input to `pl-aggregate`/`pl-tally` | fix the question file or slim the state |
+| 66 | no input | state/questions file missing or unreadable | check the paths |
+| 69 | unavailable | transport/DNS/TLS error, timeout, HTTP 5xx | check connectivity; re-run deliberately (a timeout may already be charged) |
+| 75 | rate limited | HTTP 429 | lower `--jobs`, wait, re-run (with `--state-dir` to keep successes) |
+| 76 | protocol | non-JSON response, Luna answer-count mismatch | check `--endpoint`; report the response with `--verbose` |
+| 77 | auth | no key anywhere, HTTP 401/403 | set `CLEF_API_KEY` or source `~/.config/explabs/key.env` |
+| 78 | config | non-https endpoint, model not on the allowlist, HTTP 404, judge switched off, every judge off, bad switch value | fix the config / `judges.conf` |
+
+Codes 64–78 follow BSD `sysexits.h`. **Changed in this version:** usage and
+input errors used to exit 2, the same code as a panel tie; 2 now means only
+"tie, escalate", so scripts can tell them apart.
 
 ## How a gate works
 
@@ -115,7 +259,8 @@ The key follows standard CLI practices — first source found wins:
 1. `--api-key` flag (explicit per-call; prefer the options below — flags can
    leak into shell history and process listings)
 2. `$CLEF_API_KEY` environment variable
-3. `$EXPERIENTIAL_API_KEY` environment variable (legacy name, still honored)
+3. `$EXPERIENTIAL_API_KEY` environment variable (legacy name, still honored), then `$EXPLABS_API_KEY`
+   (the name used in `~/.config/explabs/key.env`; load it with `set -a; . ~/.config/explabs/key.env; set +a`)
 4. `api_key=` in `~/.config/clef-decide/config`
 
 ```ini
@@ -154,7 +299,7 @@ harnesses auto-discover.
 - **No retries, no idempotency key.** An unknown outcome may already be charged, so the helper never re-sends on its own. (A panel tie triggers one fresh vote round, not a retried request.)
 - Context budget: 16,384 tokens shared by state + question definitions. Over budget is refused before sending.
 - Gateway bounds: ≤32 questions per request, ≤64 options per choice, 2–10 levels per score.
-- Panel: one judge one vote, majority wins, double tie escalates with exit 2.
+- Panel: one judge one vote, majority wins, double tie escalates with exit 2. Error exits are never 2 (see [Errors and exit codes](#errors-and-exit-codes)).
 
 ## Testing
 
@@ -164,16 +309,18 @@ Fully mocked — no network, no key, no charges:
 python3 -m unittest discover -s tests
 ```
 
-55 tests cover request shape, key handling, context budget, gateway bounds, judge routing, the Luna decisions route, panel voting, flag conflicts, and error surfacing. Live calls are always opt-in: ask before any potentially charged call, and never claim it worked without a real response.
+115 tests cover the pipeline stages (stream formats, ordering, sharding, resume), judge switches, structured errors and exit codes, request shape, key handling, context budget, gateway bounds, judge routing, the Luna decisions route, panel voting, flag conflicts, and error surfacing. Live calls are always opt-in: ask before any potentially charged call, and never claim it worked without a real response.
 
 ## Layout
 
 - `SKILL.md` — the drop-in agent skill (clone the URL, set a key, drive the loop).
-- `bin/clef-decide` — the CLI. Python 3, stdlib only, zero dependencies.
+- `bin/clef-decide` — the CLI and the shared core. Python 3, stdlib only, zero dependencies.
+- `bin/pl-split`, `bin/pl-ask`, `bin/pl-aggregate`, `bin/pl-tally`, `bin/pl-render`, `bin/pl-judges` — the pipeline stages (see [Pipeline](#pipeline-composable-stages)); `bin/pl_common.py` is their shared plumbing.
+- `judges.conf` — judge on/off switches.
 - `docs/quality-loop.md` — the six-phase workflow in full.
 - `docs/question-sets.md` — copy-paste question sets per phase, with state shapes.
 - `examples/launch-readiness/` — worked example: a launch-readiness gate.
-- `tests/` — the mocked test suite (`test_clef_mock.py`, `test_claims.py`, `test_config.py`, `test_judges.py`).
+- `tests/` — the mocked test suite (`test_clef_mock.py`, `test_claims.py`, `test_config.py`, `test_judges.py`, `test_sot.py`, `test_pipeline.py`, `test_errors_switches.py`).
 
 ## License
 

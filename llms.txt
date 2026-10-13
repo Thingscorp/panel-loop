@@ -17,3 +17,7 @@ bin/clef-decide --state-file report.md --questions done.json --panel
 ```
 
 Key chain: `--api-key` → `$CLEF_API_KEY` → `$EXPERIENTIAL_API_KEY` (legacy) → `api_key=` in `~/.config/clef-decide/config`. SystemOne models: `clef` (default), `clef-flash`, `jev-latest` (`:free` suffix preserved). Luna (`gpt-6-luna-decisions`, fixed) uses the decisions route, choice questions only. Question types: `choice`, `noul`, `score` — see `docs/question-sets.md` for the per-phase sets and default judge table.
+
+## Pipeline stages
+
+`bin/pl-split | bin/pl-ask [--jobs N --shard I/N --state-dir DIR] | bin/pl-aggregate | bin/pl-tally | bin/pl-render` — JSONL on stdin/stdout, same core as clef-decide. Judge switches: `judges.conf` / `$PANEL_LOOP_JUDGE_<NAME>`. Exit codes: 0 ok, 2 panel tie (escalate), 64 usage, 65 data, 66 no input, 69 unavailable, 75 rate limited, 76 protocol, 77 auth, 78 config. Errors: one JSON line on stderr; `--verbose` for debug.
