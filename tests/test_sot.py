@@ -239,7 +239,7 @@ class TestSotCli(unittest.TestCase):
             p = write_files(tmp)
             code, _, err = run_main(["--sot", "--state-file", p["state.txt"],
                                      "--skeleton-file", p["skeleton.json"]])
-            self.assertEqual(code, 2)
+            self.assertEqual(code, clef.EXIT_USAGE)  # usage errors: 64; 2 is reserved for a panel tie
             self.assertIn("--goal-file", err)
 
     def test_sot_rejects_questions_flag(self):
@@ -252,7 +252,7 @@ class TestSotCli(unittest.TestCase):
                                      "--questions", q,
                                      "--skeleton-file", p["skeleton.json"],
                                      "--goal-file", p["goal.json"]])
-            self.assertEqual(code, 2)
+            self.assertEqual(code, clef.EXIT_USAGE)  # usage errors: 64; 2 is reserved for a panel tie
             self.assertIn("--questions", err)
 
     def test_sot_rejects_panel_flag(self):
@@ -262,7 +262,7 @@ class TestSotCli(unittest.TestCase):
                                      "--state-file", p["state.txt"],
                                      "--skeleton-file", p["skeleton.json"],
                                      "--goal-file", p["goal.json"]])
-            self.assertEqual(code, 2)
+            self.assertEqual(code, clef.EXIT_USAGE)  # usage errors: 64; 2 is reserved for a panel tie
             self.assertIn("--final-panel", err)
 
     def test_sot_human_output(self):

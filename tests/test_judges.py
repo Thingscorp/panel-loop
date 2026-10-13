@@ -257,7 +257,7 @@ class TestPanelFlagConflict(unittest.TestCase):
         with patch.object(clef, "panel_vote") as pv:
             rc = clef.main(["--state-file", s, "--questions", q,
                             "--panel", "--judge", "luna"])
-        self.assertEqual(rc, 2)
+        self.assertEqual(rc, clef.EXIT_USAGE)  # usage errors: 64; 2 is reserved for a panel tie
         pv.assert_not_called()
 
     def test_panel_rejects_model_flag(self):
@@ -265,7 +265,7 @@ class TestPanelFlagConflict(unittest.TestCase):
         with patch.object(clef, "panel_vote") as pv:
             rc = clef.main(["--state-file", s, "--questions", q,
                             "--panel", "--model", "clef-flash"])
-        self.assertEqual(rc, 2)
+        self.assertEqual(rc, clef.EXIT_USAGE)  # usage errors: 64; 2 is reserved for a panel tie
         pv.assert_not_called()
 
     def test_panel_alone_reaches_vote(self):

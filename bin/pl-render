@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+"""pl-render: result JSONL in, the human summary clef-decide prints, out.
+
+One block per result line (render_human from clef-decide). Failed results
+render as "[id:judge] ERROR ..." and make the exit code non-zero (that
+result's code). Pure text formatting: no network.
+"""
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pl_common import core, parser, read_jsonl, run  # noqa: E402
+
+STAGE = "pl-render"
+
+
+def main(argv, stdin=None):
+    ap = parser(STAGE, "Render result JSONL for humans.")
+    ap.parse_args(argv)
+    code = core.EXIT_OK
+    for _, rec in read_jsonl(stdin or sys.stdin, STAGE):
+        if rec.get("ok"):
+            print(f"# {rec.get('id')} ({rec.get('judge')})")
+            print(core.render_human({"answers": rec.get("answers", {}), "usage": rec.get("usage", {})}))
+        else:
+            err = rec.get("error", {})
+            print(f"# {rec.get('id')} ({rec.get('judge')}) ERROR exit={err.get('exit')}: {err.get('error')}")
+            if code == core.EXIT_OK:
+                code = err.get("exit", core.EXIT_INTERNAL)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(run(STAGE, main, sys.argv[1:]))

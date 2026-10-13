@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""pl-split: turn a state file + questions file into request JSONL.
+
+One request per line on stdout:
+    {"id": "<qid>", "judge": "clef", "model": null, "round": 1,
+     "state": "...", "questions": {"<qid>": {...}}}
+
+Modes:
+    (default)     one request per question       -> skeleton expansion (--sot)
+    --batch       one request holding every question (the plain gate)
+    --per-judge   one request per enabled judge for ONE choice question
+                  -> tribunal fan-out (--panel); feed pl-ask, then pl-tally
+
+Validation (types, bounds, 16,384-token budget) runs here, before anything is
+sent, using the same code as clef-decide. Pure: no network, no key.
+"""
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pl_common import core, parser, read_json, read_text, run, write_jsonl  # noqa: E402
+
+STAGE = "pl-split"
+
+
+def main(argv):
+    ap = parser(STAGE, "Split state + questions into request JSONL.")
+    ap.add_argument("--state-file", required=True)
+    ap.add_argument("--questions", required=True, help="JSON map of question ID -> question")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--batch", action="store_true", help="one request with all questions")
+    mode.add_argument("--per-judge", action="store_true",
+                      help="one request per enabled judge (one choice question)")
+    ap.add_argument("--judge", default=None, choices=core.JUDGES, help="judge for each request (default clef)")
+    ap.add_argument("--model", default=None, help="SystemOne model override")
+    ap.add_argument("--round", type=int, default=1,
+                    help="vote round; part of the cache key so a tie re-run is a new vote")
+    args = ap.parse_args(argv)
+    if args.verbose:
+        os.environ[core.DEBUG_ENV] = "1"
+    state = read_text(args.state_file, STAGE)
+    questions = read_json(args.questions, STAGE)
+    core.validate_questions(questions)
+
+    if args.per_judge:
+        if args.judge or args.model:
+            raise core.ClefError("--per-judge uses every enabled judge; it cannot be "
+                                 "combined with --judge or --model", code=core.EXIT_USAGE)
+        if len(questions) != 1:
+            raise core.ClefError("--per-judge needs exactly one question", code=core.EXIT_DATA)
+        qid, q = next(iter(questions.items()))
+        if q.get("type") != "choice":
+            raise core.ClefError(f"--per-judge needs a choice question (got {q.get('type')!r})",
+                                 code=core.EXIT_DATA)
+        core.check_context_budget(state, questions)
+        judges = core.enabled_judges()
+        if not judges:
+            raise core.ClefError("every judge is switched off", code=core.EXIT_CONFIG,
+                                 fix="switch at least one judge on in judges.conf")
+        for j in judges:
+            write_jsonl({"id": qid, "judge": j, "model": None, "round": args.round,
+                         "state": state, "questions": questions})
+        return core.EXIT_OK
+
+    judge = args.judge or "clef"
+    core.resolve_judge(judge, args.model)  # fail fast on bad judge/model
+    groups = [questions] if args.batch else [{k: v} for k, v in questions.items()]
+    for g in groups:
+        core.check_context_budget(state, g)
+        rid = "+".join(g) if args.batch else next(iter(g))
+        write_jsonl({"id": rid, "judge": judge, "model": args.model, "round": args.round,
+                     "state": state, "questions": g})
+    return core.EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(run(STAGE, main, sys.argv[1:]))

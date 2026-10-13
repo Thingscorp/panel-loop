@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""pl-aggregate: skeleton results in, one goal request out (the --sot join).
+
+stdin   result JSONL from pl-ask (one skeleton point per line)
+stdout  request JSONL for the goal question. Its state is the original state
+        plus each point's verdict as "point_id -> verdict", exactly as
+        clef-decide --sot builds it. With --per-judge, one goal request per
+        enabled judge (feed pl-ask | pl-tally for the tribunal verdict).
+
+Refuses (exit 65) if any skeleton result failed, or if the goal ID collides
+with a skeleton ID. Order of points follows stdin order.
+"""
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pl_common import core, parser, read_json, read_jsonl, read_text, run, write_jsonl  # noqa: E402
+
+STAGE = "pl-aggregate"
+
+
+def main(argv, stdin=None):
+    ap = parser(STAGE, "Join skeleton verdicts into one goal request.")
+    ap.add_argument("--state-file", required=True)
+    ap.add_argument("--goal-file", required=True, help="JSON: exactly one question")
+    ap.add_argument("--judge", default=None, choices=core.JUDGES)
+    ap.add_argument("--model", default=None)
+    ap.add_argument("--per-judge", action="store_true", help="tribunal: one goal request per enabled judge")
+    ap.add_argument("--round", type=int, default=1)
+    args = ap.parse_args(argv)
+    if args.verbose:
+        os.environ[core.DEBUG_ENV] = "1"
+    state = read_text(args.state_file, STAGE)
+    goal = read_json(args.goal_file, STAGE)
+    core.validate_questions(goal)
+    if len(goal) != 1:
+        raise core.ClefError(f"the goal file must hold exactly one question (got {len(goal)})")
+    gid = next(iter(goal))
+    lines, seen = [], set()
+    for n, rec in read_jsonl(stdin or sys.stdin, STAGE):
+        if not rec.get("ok"):
+            raise core.ClefError(f"skeleton result on line {n} ({rec.get('id')}) failed; "
+                                 "not aggregating a partial skeleton",
+                                 fix="fix and re-run pl-ask (use --state-dir to keep the successes)")
+        for qid, ans in rec.get("answers", {}).items():
+            if qid == gid:
+                raise core.ClefError(f"goal question id '{gid}' collides with a skeleton point id")
+            if qid not in seen:
+                seen.add(qid)
+                lines.append(core._skeleton_verdict_line(qid, ans))
+    agg_state = (state + "\n\nSkeleton point verdicts (each judged independently):\n"
+                 + "\n".join(lines))
+    core.check_context_budget(agg_state, goal)
+    if args.per_judge:
+        if args.judge or args.model:
+            raise core.ClefError("--per-judge cannot be combined with --judge or --model",
+                                 code=core.EXIT_USAGE)
+        if goal[gid].get("type") != "choice":
+            raise core.ClefError("--per-judge needs a choice goal question")
+        judges = core.enabled_judges()
+        if not judges:
+            raise core.ClefError("every judge is switched off", code=core.EXIT_CONFIG)
+    else:
+        judges = [args.judge or "clef"]
+        core.resolve_judge(judges[0], args.model)
+    for j in judges:
+        write_jsonl({"id": gid, "judge": j, "model": args.model, "round": args.round,
+                     "state": agg_state, "questions": goal})
+    return core.EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(run(STAGE, main, sys.argv[1:]))

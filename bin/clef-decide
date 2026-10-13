@@ -83,6 +83,7 @@ LUNA_MODEL = "gpt-6-luna-decisions"
 JEV_MODEL = "jev-latest"
 KEY_ENV = "CLEF_API_KEY"
 LEGACY_KEY_ENV = "EXPERIENTIAL_API_KEY"
+EXPLABS_KEY_ENV = "EXPLABS_API_KEY"  # name used in ~/.config/explabs/key.env
 ENDPOINT_ENV = "CLEF_ENDPOINT"
 LUNA_ENDPOINT_ENV = "LUNA_ENDPOINT"
 DEFAULT_CONFIG_PATH = os.path.join(
@@ -100,8 +101,81 @@ MIN_SCORE_LEVELS = 2
 MAX_SCORE_LEVELS = 10
 
 
+# Exit codes. 0 and 2 are the original contract (2 = panel tie, escalate to
+# the owner). Failure codes follow BSD sysexits.h so each class of problem is
+# distinguishable by scripts (xargs, make, CI) without parsing stderr.
+EXIT_OK = 0
+EXIT_INTERNAL = 1      # unexpected bug in the helper itself
+EXIT_TIE = 2           # panel double tie: escalate, never auto-pick
+EXIT_USAGE = 64        # EX_USAGE: bad or contradictory flags
+EXIT_DATA = 65         # EX_DATAERR: invalid questions, bounds, budget, bad JSON
+EXIT_NOINPUT = 66      # EX_NOINPUT: input file missing or unreadable
+EXIT_UNAVAILABLE = 69  # EX_UNAVAILABLE: transport error, timeout, HTTP 5xx
+EXIT_RATELIMIT = 75    # EX_TEMPFAIL: HTTP 429
+EXIT_PROTOCOL = 76     # EX_PROTOCOL: non-JSON or unexpected response shape
+EXIT_AUTH = 77         # EX_NOPERM: no key, HTTP 401/403
+EXIT_CONFIG = 78       # EX_CONFIG: bad endpoint, judge disabled, no judges
+
+DEBUG_ENV = "PANEL_LOOP_DEBUG"
+
+
 class ClefError(Exception):
-    pass
+    """An error with enough context to troubleshoot from stderr alone.
+
+    str(e) stays the plain message (the original contract); to_dict() adds
+    stage, judge, model, HTTP status, endpoint, likely cause and suggested fix.
+    """
+
+    def __init__(self, message, code=EXIT_DATA, stage=None, judge=None,
+                 model=None, status=None, endpoint=None, cause=None, fix=None):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+        self.stage = stage
+        self.judge = judge
+        self.model = model
+        self.status = status
+        self.endpoint = endpoint
+        self.cause = cause
+        self.fix = fix
+
+    def __str__(self):
+        return self.message
+
+    def prefixed(self, prefix, **fields):
+        """Same error, message prefixed (e.g. '[jev] '), extra fields filled."""
+        e = ClefError(prefix + self.message, self.code, self.stage, self.judge,
+                      self.model, self.status, self.endpoint, self.cause, self.fix)
+        for k, v in fields.items():
+            if getattr(e, k) is None:
+                setattr(e, k, v)
+        return e
+
+    def to_dict(self):
+        d = {"error": self.message, "exit": self.code}
+        for k in ("stage", "judge", "model", "status", "endpoint", "cause", "fix"):
+            v = getattr(self, k)
+            if v is not None:
+                d[k] = v
+        return d
+
+
+def debug(msg):
+    """Diagnostics to stderr when $PANEL_LOOP_DEBUG is set (--verbose sets it).
+    Never prints the API key."""
+    if os.environ.get(DEBUG_ENV) not in (None, "", "0"):
+        print(f"debug: {msg}", file=sys.stderr)
+
+
+def emit_error(prog, e, stage=None):
+    """Write one human line and one JSON line to stderr; return the exit code."""
+    if stage and e.stage is None:
+        e.stage = stage
+    print(f"{prog}: {e}", file=sys.stderr)
+    if e.fix:
+        print(f"{prog}: fix: {e.fix}", file=sys.stderr)
+    print(json.dumps(e.to_dict(), sort_keys=True), file=sys.stderr)
+    return e.code
 
 
 def estimate_tokens(text):
@@ -147,7 +221,9 @@ def check_context_budget(state_text, questions):
         raise ClefError(
             f"estimated {est} tokens exceeds Clef's {MAX_CONTEXT_TOKENS} context budget "
             f"(shared by state + question definitions). Slim the state — send a concise "
-            f"diff and test summary, not the whole repository."
+            f"diff and test summary, not the whole repository.",
+            cause="state + questions too large for one request",
+            fix="slim the state, or split questions across requests (--sot / pl-split)",
         )
     return est
 
@@ -178,7 +254,7 @@ def resolve_key(flag_value=None, config_path=None):
     (legacy) > config file. Never prompts, never logs."""
     if flag_value:
         return flag_value
-    for env in (KEY_ENV, LEGACY_KEY_ENV):
+    for env in (KEY_ENV, LEGACY_KEY_ENV, EXPLABS_KEY_ENV):
         v = os.environ.get(env)
         if v:
             return v
@@ -187,8 +263,10 @@ def resolve_key(flag_value=None, config_path=None):
         return cfg["api_key"]
     raise ClefError(
         "no API key found. Provide one via --api-key, $CLEF_API_KEY "
-        "(legacy: $EXPERIENTIAL_API_KEY), or api_key= in "
-        "~/.config/clef-decide/config"
+        "(legacy: $EXPERIENTIAL_API_KEY, or $EXPLABS_API_KEY), or api_key= in "
+        "~/.config/clef-decide/config",
+        code=EXIT_AUTH, cause="no key in flag, env, or config file",
+        fix="export CLEF_API_KEY=... or: set -a; . ~/.config/explabs/key.env; set +a",
     )
 
 
@@ -201,7 +279,9 @@ def resolve_endpoint(flag_value=None, config_path=None):
     else:
         ep = read_config_file(config_path).get("endpoint") or ENDPOINT
     if not ep.startswith("https://"):
-        raise ClefError(f"endpoint must be an https:// URL (got {ep!r})")
+        raise ClefError(f"endpoint must be an https:// URL (got {ep!r})",
+                        code=EXIT_CONFIG, endpoint=ep,
+                        fix="set --endpoint / $CLEF_ENDPOINT / endpoint= to an https:// URL")
     return ep
 
 
@@ -214,7 +294,9 @@ def resolve_luna_endpoint(flag_value=None, config_path=None):
     else:
         ep = read_config_file(config_path).get("luna_endpoint") or LUNA_ENDPOINT
     if not ep.startswith("https://"):
-        raise ClefError(f"luna endpoint must be an https:// URL (got {ep!r})")
+        raise ClefError(f"luna endpoint must be an https:// URL (got {ep!r})",
+                        code=EXIT_CONFIG, endpoint=ep, judge="luna",
+                        fix="set --luna-endpoint / $LUNA_ENDPOINT / luna_endpoint= to an https:// URL")
     return ep
 
 
@@ -225,19 +307,41 @@ def resolve_judge(judge, model_flag=None):
     Luna's model is fixed; --model with --judge luna is rejected.
     """
     if judge not in JUDGES:
-        raise ClefError(f"judge must be one of {JUDGES} (got {judge!r})")
+        raise ClefError(f"judge must be one of {JUDGES} (got {judge!r})",
+                        code=EXIT_USAGE, judge=judge)
     if judge == "luna":
         if model_flag is not None:
             raise ClefError("--model cannot be combined with --judge luna "
-                            f"(Luna's model is fixed: {LUNA_MODEL})")
+                            f"(Luna's model is fixed: {LUNA_MODEL})",
+                            code=EXIT_USAGE, judge="luna")
         return ("decisions", LUNA_MODEL)
     model = model_flag or JUDGE_DEFAULT_MODEL[judge]
     base = model.split(":")[0]
     if base not in ALLOWED_MODELS:
         raise ClefError(
             f"model must be one of {ALLOWED_MODELS} (got {model!r}); "
-            "these are decision helpers, not chat models")
+            "these are decision helpers, not chat models",
+            code=EXIT_CONFIG, model=model,
+            fix="use clef, clef-flash, or jev-latest (optionally with :free)")
     return ("systemone", model)
+
+
+def http_error_hint(status):
+    """Map an HTTP status to (exit code, likely cause, suggested fix)."""
+    if status in (401, 403):
+        return (EXIT_AUTH, "API key missing, invalid, or not allowed for this model",
+                "check CLEF_API_KEY / EXPLABS_API_KEY and that the key has access to the model")
+    if status == 429:
+        return (EXIT_RATELIMIT, "rate limited or quota exhausted",
+                "lower pl-ask --jobs, wait, then re-run deliberately (no automatic retry)")
+    if status == 404:
+        return (EXIT_CONFIG, "wrong endpoint path or unknown model",
+                "check --endpoint and --model against the documented routes")
+    if 400 <= status < 500:
+        return (EXIT_DATA, "request rejected: question shape, model name, or bounds",
+                "validate questions.json against docs/question-sets.md; see response detail")
+    return (EXIT_UNAVAILABLE, "server-side error at the decision API",
+            "try again later; the outcome may be unknown, so re-run deliberately")
 
 
 def _post(url, key, body, timeout, _opener=None):
@@ -253,20 +357,33 @@ def _post(url, key, body, timeout, _opener=None):
         },
     )
     opener = _opener or urllib.request.urlopen
+    debug(f"POST {url} model={body.get('model')} bytes={len(data)}")
     try:
         with opener(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:2000]
-        raise ClefError(f"HTTP {e.code} from {url}: {detail}")
+        code, cause, fix = http_error_hint(e.code)
+        raise ClefError(f"HTTP {e.code} from {url}: {detail}", code=code,
+                        status=e.code, endpoint=url, model=body.get("model"),
+                        cause=cause, fix=fix)
     except urllib.error.URLError as e:
-        raise ClefError(f"transport error calling {url}: {e.reason}")
+        raise ClefError(f"transport error calling {url}: {e.reason}",
+                        code=EXIT_UNAVAILABLE, endpoint=url, model=body.get("model"),
+                        cause="network/DNS/TLS failure before a response",
+                        fix="check connectivity and the endpoint URL; not retried automatically")
     except TimeoutError:
-        raise ClefError(f"request to {url} timed out after {timeout}s (no retry: outcome unknown)")
+        raise ClefError(f"request to {url} timed out after {timeout}s (no retry: outcome unknown)",
+                        code=EXIT_UNAVAILABLE, endpoint=url, model=body.get("model"),
+                        cause="no response within --timeout; the call may still have been charged",
+                        fix="raise --timeout or slim the state; re-run only deliberately")
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        raise ClefError(f"non-JSON response from {url}: {raw[:500]}")
+        raise ClefError(f"non-JSON response from {url}: {raw[:500]}",
+                        code=EXIT_PROTOCOL, endpoint=url, model=body.get("model"),
+                        cause="endpoint is not the decision API (proxy, captive portal, wrong URL)",
+                        fix="check --endpoint / --luna-endpoint")
 
 
 def call_clef(model, state, questions, timeout=DEFAULT_TIMEOUT,
@@ -278,7 +395,9 @@ def call_clef(model, state, questions, timeout=DEFAULT_TIMEOUT,
     if base not in ALLOWED_MODELS:
         raise ClefError(
             f"model must be one of {ALLOWED_MODELS} (got {model!r}); "
-            "these are decision helpers, not chat models")
+            "these are decision helpers, not chat models",
+            code=EXIT_CONFIG, model=model,
+            fix="use clef, clef-flash, or jev-latest (optionally with :free)")
     validate_questions(questions)
     state_text = state if isinstance(state, str) else json.dumps(state, sort_keys=True)
     est = check_context_budget(state_text, questions)
@@ -321,7 +440,10 @@ def call_luna(state, questions, timeout=DEFAULT_TIMEOUT,
     if len(raw_answers) != len(questions):
         raise ClefError(
             f"Luna decisions route returned {len(raw_answers)} answers for "
-            f"{len(questions)} questions; refusing to guess the mapping")
+            f"{len(questions)} questions; refusing to guess the mapping",
+            code=EXIT_PROTOCOL, judge="luna", model=LUNA_MODEL, endpoint=url,
+            cause="decisions route answered a different number of questions",
+            fix="re-run with --verbose and report the response shape")
     answers = {}
     for qid, ans in zip(questions.keys(), raw_answers):
         answers[qid] = {
@@ -341,11 +463,69 @@ def _probs_dict(probs):
     return dict(probs)
 
 
+JUDGES_FILE_ENV = "PANEL_LOOP_JUDGES_FILE"
+DEFAULT_JUDGES_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "judges.conf")
+_TRUE = ("1", "true", "yes", "on")
+_FALSE = ("0", "false", "no", "off")
+
+
+def _judge_env(judge):
+    return "PANEL_LOOP_JUDGE_" + judge.upper().replace("-", "_")
+
+
+def _parse_bool(v, where):
+    v = str(v).strip().lower()
+    if v in _TRUE:
+        return True
+    if v in _FALSE:
+        return False
+    raise ClefError(f"{where}: expected true/false, got {v!r}", code=EXIT_CONFIG,
+                    fix="use true/false (or on/off, yes/no, 1/0)")
+
+
+def judge_switches(config_path=None, judges_file=None):
+    """Which judges are switched on. First source found wins, per judge:
+    $PANEL_LOOP_JUDGE_<NAME> > judge.<name>= in the config file >
+    <name>= in judges.conf ($PANEL_LOOP_JUDGES_FILE or repo root) > on.
+    Toggling a judge never needs a code change."""
+    jf = judges_file or os.environ.get(JUDGES_FILE_ENV) or DEFAULT_JUDGES_FILE
+    file_cfg = read_config_file(jf)
+    user_cfg = read_config_file(config_path)
+    out = {}
+    for j in JUDGES:
+        env = os.environ.get(_judge_env(j))
+        if env not in (None, ""):
+            out[j] = _parse_bool(env, "$" + _judge_env(j))
+        elif "judge." + j in user_cfg:
+            out[j] = _parse_bool(user_cfg["judge." + j], "config judge." + j)
+        elif j in file_cfg:
+            out[j] = _parse_bool(file_cfg[j], f"{jf}: {j}")
+        else:
+            out[j] = True
+    return out
+
+
+def enabled_judges(config_path=None, judges_file=None):
+    sw = judge_switches(config_path, judges_file)
+    return tuple(j for j in JUDGES if sw[j])
+
+
+def require_enabled(judge, config_path=None):
+    if judge in JUDGES and not judge_switches(config_path)[judge]:
+        raise ClefError(f"judge '{judge}' is switched off", code=EXIT_CONFIG,
+                        judge=judge, cause="disabled in env, config, or judges.conf",
+                        fix=f"set {_judge_env(judge)}=true or {judge}=true in judges.conf, "
+                            "or pick another --judge")
+
+
 def call_judge(judge, state, questions, timeout=DEFAULT_TIMEOUT,
                api_key=None, endpoint=None, luna_endpoint=None,
                config_path=None, model=None, _opener=None):
     """Dispatch to the judge's native route. Returns (payload, est)."""
     route, resolved_model = resolve_judge(judge, model)
+    debug(f"judge={judge} route={route} model={resolved_model} questions={list(questions) if isinstance(questions, dict) else '?'}")
+    require_enabled(judge, config_path)
     if route == "decisions":
         return call_luna(state, questions, timeout, api_key, luna_endpoint,
                          config_path, _opener)
@@ -393,36 +573,36 @@ def panel_vote(state, questions, timeout=DEFAULT_TIMEOUT, api_key=None,
         try:
             return vote_fn(judge)
         except ClefError as e:
-            raise ClefError(f"[{judge}] {e}")
+            raise e.prefixed(f"[{judge}] ", judge=judge, stage="panel")
         except Exception as e:  # noqa: BLE001 — attribute, don't swallow
-            raise ClefError(f"[{judge}] unexpected error: {e}")
+            raise ClefError(f"[{judge}] unexpected error: {e}", code=EXIT_INTERNAL,
+                            judge=judge, stage="panel")
+
+    judges = enabled_judges(config_path)
+    if not judges:
+        raise ClefError("--panel: every judge is switched off", code=EXIT_CONFIG,
+                        stage="panel", fix="switch at least one judge on in judges.conf")
 
     import concurrent.futures as cf
     rounds = []
     for _ in range(2):
         votes, probs = {}, {}
-        with cf.ThreadPoolExecutor(max_workers=len(JUDGES)) as ex:
-            futs = {ex.submit(attributed, j): j for j in JUDGES}
+        with cf.ThreadPoolExecutor(max_workers=len(judges)) as ex:
+            futs = {ex.submit(attributed, j): j for j in judges}
             for f in cf.as_completed(futs):
                 j = futs[f]
                 choice, p = f.result()
                 votes[j] = choice
                 probs[j] = p
-        counts = {}
-        for c in votes.values():
-            counts[c] = counts.get(c, 0) + 1
+        counts, leaders = tally(votes)
         rounds.append({"votes": votes, "counts": counts})
-        top = max(counts.values())
-        leaders = [c for c, n in counts.items() if n == top]
         if len(leaders) == 1:
             break
 
-    final = rounds[-1]
-    top = max(final["counts"].values())
-    leaders = [c for c, n in final["counts"].items() if n == top]
+    _, leaders = tally(rounds[-1]["votes"])
     mean = {}
     for opt in options:
-        vals = [probs.get(j, {}).get(opt, 0.0) for j in JUDGES]
+        vals = [probs.get(j, {}).get(opt, 0.0) for j in judges]
         mean[opt] = round(sum(vals) / len(vals), 3)
     return {
         "qid": qid,
@@ -432,6 +612,18 @@ def panel_vote(state, questions, timeout=DEFAULT_TIMEOUT, api_key=None,
         "tie": len(leaders) > 1,
         "mean_probabilities": mean,
     }
+
+
+def tally(votes):
+    """The tribunal rule: one judge, one vote; majority wins.
+    votes: {judge: choice}. Returns (counts, leaders); one leader = winner."""
+    counts = {}
+    for c in votes.values():
+        counts[c] = counts.get(c, 0) + 1
+    if not counts:
+        return counts, []
+    top = max(counts.values())
+    return counts, [c for c, n in counts.items() if n == top]
 
 
 def render_panel(result):
@@ -497,9 +689,10 @@ def sot_judge(state, skeleton, goal, judge="clef", timeout=DEFAULT_TIMEOUT,
                                     config_path, model, _opener)
             return payload["answers"][qid]
         except ClefError as e:
-            raise ClefError(f"[skeleton:{qid}] {e}")
+            raise e.prefixed(f"[skeleton:{qid}] ", stage="sot", judge=judge)
         except Exception as e:  # noqa: BLE001 - attribute, don't swallow
-            raise ClefError(f"[skeleton:{qid}] unexpected error: {e}")
+            raise ClefError(f"[skeleton:{qid}] unexpected error: {e}",
+                            code=EXIT_INTERNAL, stage="sot", judge=judge)
 
     answers = {}
     with cf.ThreadPoolExecutor(max_workers=len(skeleton)) as ex:
@@ -564,9 +757,33 @@ def render_human(payload):
     return "\n".join(lines)
 
 
+class UsageParser:
+    """argparse that exits EXIT_USAGE (64) instead of argparse's default 2,
+    which is reserved for the panel tie."""
+
+    @staticmethod
+    def make(**kw):
+        import argparse
+
+        class _P(argparse.ArgumentParser):
+            def error(self, message):
+                self.print_usage(sys.stderr)
+                e = ClefError(message, code=EXIT_USAGE, stage=self.prog,
+                              fix=f"see {self.prog} --help")
+                emit_error(self.prog, e)
+                raise SystemExit(EXIT_USAGE)
+        return _P(**kw)
+
+
+def add_common_flags(ap):
+    ap.add_argument("--verbose", "-v", action="store_true",
+                    help=f"debug diagnostics to stderr (same as {DEBUG_ENV}=1); never prints the key")
+
+
 def main(argv):
-    import argparse
-    ap = argparse.ArgumentParser(description="Clef decision helper (SystemOne). Never a chat model.")
+    ap = UsageParser.make(prog="clef-decide",
+                          description="Clef decision helper (SystemOne). Never a chat model.")
+    add_common_flags(ap)
     ap.add_argument("--state-file", required=True, help="file with the state text (concise diff + test summary)")
     ap.add_argument("--questions", default=None, help="JSON file: map of question ID -> question")
     ap.add_argument("--sot", action="store_true",
@@ -593,18 +810,20 @@ def main(argv):
                     help=f"decisions endpoint URL for Luna (default {LUNA_ENDPOINT})")
     ap.add_argument("--json", action="store_true", help="print raw response JSON instead of human summary")
     args = ap.parse_args(argv)
+    if args.verbose:
+        os.environ[DEBUG_ENV] = "1"
 
     try:
         with open(args.state_file, "r", encoding="utf-8") as f:
             state = f.read()
         if args.sot:
             if args.questions is not None:
-                raise ClefError("--sot uses --skeleton-file and --goal-file, not --questions")
+                raise ClefError("--sot uses --skeleton-file and --goal-file, not --questions", code=EXIT_USAGE)
             if args.panel:
                 raise ClefError("--sot cannot be combined with --panel; "
-                                "add --final-panel for a tribunal verdict")
+                                "add --final-panel for a tribunal verdict", code=EXIT_USAGE)
             if not args.skeleton_file or not args.goal_file:
-                raise ClefError("--sot needs --skeleton-file and --goal-file")
+                raise ClefError("--sot needs --skeleton-file and --goal-file", code=EXIT_USAGE)
             with open(args.skeleton_file, "r", encoding="utf-8") as f:
                 skeleton = json.load(f)
             with open(args.goal_file, "r", encoding="utf-8") as f:
@@ -619,17 +838,17 @@ def main(argv):
             else:
                 print(render_sot(result))
             if result["final_panel"]:
-                return 0 if result["final"]["winner"] else 2
+                return EXIT_OK if result["final"]["winner"] else EXIT_TIE
             return 0
         if args.questions is None:
             raise ClefError("--questions is required "
-                            "(or --sot with --skeleton-file/--goal-file)")
+                            "(or --sot with --skeleton-file/--goal-file)", code=EXIT_USAGE)
         with open(args.questions, "r", encoding="utf-8") as f:
             questions = json.load(f)
         if args.panel:
             if args.judge is not None or args.model is not None:
                 raise ClefError("--panel uses all four judges; it cannot be "
-                                "combined with --judge or --model")
+                                "combined with --judge or --model", code=EXIT_USAGE)
             result = panel_vote(state, questions, timeout=args.timeout,
                                 api_key=args.api_key, endpoint=args.endpoint,
                                 luna_endpoint=args.luna_endpoint)
@@ -637,7 +856,7 @@ def main(argv):
                 print(json.dumps(result, indent=2))
             else:
                 print(render_panel(result))
-            return 0 if result["winner"] else 2
+            return EXIT_OK if result["winner"] else EXIT_TIE
         payload, _est = call_judge(args.judge or "clef", state, questions,
                                    timeout=args.timeout,
                                    api_key=args.api_key,
@@ -645,11 +864,16 @@ def main(argv):
                                    luna_endpoint=args.luna_endpoint,
                                    model=args.model)
     except ClefError as e:
-        print(f"clef-decide: {e}", file=sys.stderr)
-        return 2
+        return emit_error("clef-decide", e, stage="clef-decide")
+    except json.JSONDecodeError as e:
+        return emit_error("clef-decide", ClefError(
+            f"invalid JSON in an input file: {e}", code=EXIT_DATA,
+            fix="validate the file with: python3 -m json.tool FILE"), stage="clef-decide")
     except OSError as e:
-        print(f"clef-decide: file error: {e}", file=sys.stderr)
-        return 2
+        return emit_error("clef-decide", ClefError(
+            f"file error: {e}", code=EXIT_NOINPUT,
+            fix="check the --state-file/--questions/--skeleton-file/--goal-file paths"),
+            stage="clef-decide")
 
     if args.json:
         print(json.dumps(payload, indent=2))
