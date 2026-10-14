@@ -8,17 +8,19 @@ The rule of the loop: **the agent is the hands, the panel is the judge.** No gat
 
 ## Verified claims
 
-Every claim below is backed by a test in `tests/` — fully mocked, no network, no key, no charges. Run them yourself: `python3 -m unittest discover -s tests` (79/79 pass, ~0.1s).
+Every claim below is backed by a test in `tests/` — fully mocked, no network, no key, no charges. Run them yourself: `python3 -m unittest discover -s tests` (101/101 pass, ~0.4s).
 
 | Claim | Backing data |
 |---|---|
-| POSTs only to the three known endpoints | `test_request_shape` asserts the exact URL and POST method; `test_endpoints_are_the_only_real_urls_in_source` scans `bin/clef-decide` for any other URL — none exists |
+| POSTs only to the three known endpoints in source; a custom judge POSTs only to the endpoint in its own config definition | `test_request_shape` asserts the exact URL and POST method; `test_endpoints_are_the_only_real_urls_in_source` scans `bin/clef-decide` for any other URL — the only extra is the Pgeon credit link in the docstring, which is attribution and never POSTed to |
 | SubQ is a fifth judge on its own endpoint, with its own key chain | `test_subq_posts_to_subq_endpoint_with_systemone_shape`, `test_subq_key_missing_raises`, `test_subq_endpoint_precedence`, `test_panel_fans_out_to_five_judges`; `test_model_allowlist_pinned` pins `JUDGES` and `SUBQ_MODEL` |
+| Panel composition is a preference, not code: flag > env > config > all registered judges | `tests/test_panel_config.py`: `test_config_removes_judges`, `test_env_overrides_config`, `test_flag_overrides_env_and_config`, `test_panel_vote_uses_configured_subset` |
+| A new judge is three config lines, no code change | `tests/test_panel_config.py`: `test_registered_includes_custom`, `test_custom_call_posts_to_its_endpoint_with_its_key`, `test_custom_key_from_env`, `test_custom_missing_fields_named`, `test_custom_judge_can_join_panel` |
 | API key from standard config, never prompted or logged | `test_missing_key_stops` (helper refuses without it); `test_key_never_prompted_interactively` (no `input()`/`getpass` anywhere in source); `tests/test_config.py` proves the full precedence chain |
 | No retries, no idempotency key | `test_no_retry_on_transport_error`: a failed transport produces exactly 1 attempt, never a resend; `test_no_idempotency_header_sent` |
 | 16,384-token budget enforced before sending | `test_context_budget_refuses`; `test_constants_match_claims` pins the constant |
 | ≤32 questions, ≤64 options, 2–10 score levels | `test_gateway_bounds` exercises each bound; `test_constants_match_claims` pins them |
-| `bin/clef-decide` is executable and stdlib-only | `test_helper_is_executable`; `test_stdlib_only_imports` (imports: argparse, concurrent.futures, json, os, sys, urllib — nothing else) |
+| `bin/clef-decide` is executable and stdlib-only | `test_helper_is_executable`; `test_stdlib_only_imports` (imports: argparse, concurrent.futures, json, os, re, sys, urllib — nothing else) |
 | SystemOne model is `clef`, `clef-flash`, or `jev-latest` only (`:free` preserved); anything else rejected | `test_flash_model_sent_exactly`, `test_flash_free_spelling_preserved`, `test_unknown_clef_variant_rejected`, `test_model_allowlist_pinned` |
 | Luna uses the decisions route with the proven choice shape; other types rejected | `test_luna_posts_to_decisions_with_proven_shape`, `test_luna_rejects_non_choice` |
 | Panel: one judge one vote, majority wins, double tie escalates | `test_majority_wins`, `test_tie_reruns_then_decides`, `test_double_tie_escalates` |
@@ -62,13 +64,37 @@ Only `clef`, `clef-flash`, and `jev-latest` (plus a `:free` suffix spelling, pre
 
 ### Panel votes
 
-`--panel` fans one choice question out to all five judges in parallel and applies the tribunal rule: **one judge, one vote; majority wins.** A tie re-runs once (new votes, not retried requests); a second tie escalates to the owner — the helper exits 2 and never auto-picks.
+`--panel` fans one choice question out to every judge on the panel in parallel and applies the tribunal rule: **one judge, one vote; majority wins.** A tie re-runs once (new votes, not retried requests); a second tie escalates to the owner — the helper exits 2 and never auto-picks.
 
 ```bash
 bin/clef-decide --state-file report.md --questions done.json --panel
+bin/clef-decide --state-file report.md --questions done.json --panel --panel-judges clef,jev,luna
 ```
 
-`done.json` must hold exactly one choice question, e.g. `{"done": {"type": "choice", "instructions": "...", "criteria": {"done": "...", "not_done": "..."}}}`. Use the panel for the loop-termination gate (phase 6) and other high-stakes verdicts; routine gates stay single-judge. `--panel` cannot be combined with `--judge` or `--model` — it always uses all five judges, and contradictory flags fail loudly instead of being silently ignored.
+`done.json` must hold exactly one choice question, e.g. `{"done": {"type": "choice", "instructions": "...", "criteria": {"done": "...", "not_done": "..."}}}`. Use the panel for the loop-termination gate (phase 6) and other high-stakes verdicts; routine gates stay single-judge. `--panel` cannot be combined with `--judge` or `--model`, and contradictory flags fail loudly instead of being silently ignored.
+
+The tribunal rule is **Pgeon technology**: it comes from [Pgeon](https://pgeon.com), Thingscorp's agent QA platform, where a panel of judges decides open questions exactly this way — one judge, one vote, majority wins, ties escalate instead of being auto-picked. panel-loop borrows that rule for its termination verdicts and other high-stakes gates.
+
+### Adding or removing judges
+
+The panel is a preference, not a fixed roster. Composition resolves in this order, first source found wins:
+
+1. `--panel-judges clef,jev,luna` flag (per run)
+2. `$PANEL_JUDGES` environment variable
+3. `panel_judges=` in `~/.config/clef-decide/config`
+4. Default: every registered judge
+
+Removing a judge from the panel is removing its name from that list; adding one is adding it. (Single-judge gates are unaffected: any registered judge can still drive a gate via `--judge`.)
+
+Adding a whole new judge needs no code change either. Any SystemOne-compatible decision endpoint becomes a judge with three lines in the config file:
+
+```ini
+judge_oracle_endpoint=https://oracle.example/v1/systemone
+judge_oracle_model=oracle-1
+judge_oracle_api_key=...
+```
+
+It can then drive gates (`--judge oracle`) and join the panel list. Its key can also come from `$JUDGE_ORACLE_API_KEY`. Custom names must not collide with a built-in judge's name, endpoints must be https, and a half-written definition fails loudly (naming the missing lines) only when that judge is used, never breaking the built-ins.
 
 ### Skeleton-of-judgment
 
@@ -82,7 +108,7 @@ bin/clef-decide --sot --state-file report.md --skeleton-file skeleton.json --goa
 - `--skeleton-file`: map of point ID → question (choice/noul/score), ≤32. One request per point, so each point sees the full state under its own 16,384-token context budget instead of sharing one request's budget.
 - `--goal-file`: exactly one question, the final verdict. Its state is the original state plus the per-point verdicts, each rendered as `point_id -> verdict`.
 - `--final-panel`: the goal goes to the full tribunal (one judge, one vote, majority wins); a tie re-runs once, a second tie exits 2. Without it, the goal goes to `--judge` (default `clef`).
-- Expansion uses `--judge`/`--model`; with `--final-panel` the expansion still uses that judge while the verdict uses all five. `--sot` cannot be combined with `--questions` or `--panel` — contradictory flags fail loudly.
+- Expansion uses `--judge`/`--model`; with `--final-panel` the expansion still uses that judge while the verdict uses the configured panel. `--sot` cannot be combined with `--questions` or `--panel` — contradictory flags fail loudly.
 - A failing point names itself: `[skeleton:<point_id>] <error>`.
 
 Use `--sot` when a gate's evidence is too large for one request's context budget, or when the sub-judgments are genuinely independent and deserve the full state each. When the questions fit one request and share evidence, the plain batched form is cheaper (fewer requests).
@@ -127,6 +153,10 @@ api_key=...
 # endpoint=https://...        # override the SystemOne endpoint (https:// only)
 # luna_endpoint=https://...   # override the decisions endpoint (https:// only)
 # subq_endpoint=https://...   # override the SubQ endpoint (https:// only)
+# panel_judges=clef,jev,luna  # panel composition (default: all registered judges)
+# judge_<name>_endpoint=https://...   # define a custom judge (SystemOne wire)
+# judge_<name>_model=...
+# judge_<name>_api_key=...
 ```
 
 The SystemOne endpoint is likewise overridable: `--endpoint` flag → `$CLEF_ENDPOINT`
@@ -167,6 +197,7 @@ harnesses auto-discover.
 - Context budget: 16,384 tokens shared by state + question definitions. Over budget is refused before sending.
 - Gateway bounds: ≤32 questions per request, ≤64 options per choice, 2–10 levels per score.
 - Panel: one judge one vote, majority wins, double tie escalates with exit 2.
+- Panel composition is a preference (flag > `$PANEL_JUDGES` > config file > all registered judges), never a code change. Custom judges exist only as config definitions: https endpoint, fixed model, own key — the Experiential key chain is never consulted for them.
 
 ## Testing
 
@@ -176,7 +207,7 @@ Fully mocked — no network, no key, no charges:
 python3 -m unittest discover -s tests
 ```
 
-79 tests cover request shape, key handling, context budget, gateway bounds, judge routing, the Luna decisions route, the SubQ route and its key isolation, panel voting, skeleton-of-judgment, flag conflicts, and error surfacing. Live calls are always opt-in: ask before any potentially charged call, and never claim it worked without a real response.
+101 tests cover request shape, key handling, context budget, gateway bounds, judge routing, the Luna decisions route, the SubQ route and its key isolation, panel voting, panel composition preferences, config-defined custom judges, skeleton-of-judgment, flag conflicts, and error surfacing. Live calls are always opt-in: ask before any potentially charged call, and never claim it worked without a real response.
 
 ## Layout
 
@@ -186,7 +217,11 @@ python3 -m unittest discover -s tests
 - `docs/question-sets.md` — copy-paste question sets per phase, with state shapes.
 - `examples/launch-readiness/` — worked example: a launch-readiness gate.
 - `llms.txt` — the short machine-readable summary for LLMs and agents.
-- `tests/` — the mocked test suite (`test_clef_mock.py`, `test_claims.py`, `test_config.py`, `test_judges.py`, `test_sot.py`).
+- `tests/` — the mocked test suite (`test_clef_mock.py`, `test_claims.py`, `test_config.py`, `test_judges.py`, `test_panel_config.py`, `test_sot.py`).
+
+## Credit
+
+The tribunal voting rule at the heart of `--panel` — one judge, one vote, majority wins, a double tie escalates to a human instead of being auto-picked — comes from [Pgeon](https://pgeon.com), Thingscorp's agent QA platform, where judge panels decide open questions for agents. panel-loop's `--panel` and `--final-panel` verdicts run on Pgeon technology.
 
 ## License
 

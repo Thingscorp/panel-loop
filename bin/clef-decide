@@ -12,9 +12,21 @@ Five judges can drive the loop, each with a native route (--judge):
   luna       the /v1/decisions route, structured scored audits (choice only)
   subq       SubQ Snap, SystemOne-compatible fast decisions on api.subq.ai
 
---panel fans one choice question out to all five judges in parallel.
-Tribunal rule, borrowed from the pgeon tribunal: one judge, one vote;
-majority wins; a tie re-runs once, then escalates (exit 2, no auto-pick).
+--panel fans one choice question out to every judge on the panel in
+parallel. The tribunal rule is Pgeon technology (https://pgeon.com),
+borrowed from the Pgeon tribunal: one judge, one vote; majority wins;
+a tie re-runs once, then escalates (exit 2, no auto-pick).
+
+Judges are freely added or removed by preference — the built-ins are
+defaults, not a fixed roster:
+- Panel composition: --panel-judges flag > $PANEL_JUDGES > panel_judges=
+  in the config file > all registered judges. Removing a judge from the
+  panel is removing its name from that list; adding one is adding it.
+- New judges: any SystemOne-compatible decision endpoint becomes a judge
+  by defining three config lines (judge_<name>_endpoint, judge_<name>_model,
+  judge_<name>_api_key). It can then drive a gate via --judge <name> and
+  join the panel list. Its key can also come from $JUDGE_<NAME>_API_KEY.
+  Custom names must not collide with a built-in judge's name.
 
 Hard rules (from the integration spec):
 - POST only to the Clef endpoint (default
@@ -64,6 +76,10 @@ Config file (~/.config/clef-decide/config), KEY=VALUE lines, # comments:
     luna_endpoint=https://...  (decisions route)
     subq_api_key=...          (separate provider, only for --judge subq)
     subq_endpoint=https://...  (SubQ route)
+    panel_judges=clef,jev,luna   (panel composition preference; default: all)
+    judge_<name>_endpoint=https://...   (custom judge definition)
+    judge_<name>_model=...
+    judge_<name>_api_key=...
 
 questions.json shape:
     {
@@ -79,6 +95,7 @@ Panel mode: questions.json must hold exactly one choice question
 """
 import json
 import os
+import re
 import sys
 import urllib.request
 import urllib.error
@@ -98,7 +115,9 @@ SUBQ_ENDPOINT_ENV = "SUBQ_ENDPOINT"
 DEFAULT_CONFIG_PATH = os.path.join(
     os.path.expanduser("~"), ".config", "clef-decide", "config")
 DEFAULT_MODEL = "clef"
-JUDGES = ("clef", "clef-flash", "jev", "luna", "subq")
+BUILTIN_JUDGES = ("clef", "clef-flash", "jev", "luna", "subq")
+JUDGES = BUILTIN_JUDGES
+PANEL_JUDGES_ENV = "PANEL_JUDGES"
 JUDGE_DEFAULT_MODEL = {"clef": "clef", "clef-flash": "clef-flash", "jev": JEV_MODEL,
                        "subq": SUBQ_MODEL}
 ALLOWED_MODELS = ("clef", "clef-flash", "jev-latest")
@@ -184,6 +203,104 @@ def read_config_file(path=None):
     return cfg
 
 
+def custom_judges(config_path=None):
+    """Custom judge definitions from the config file.
+
+    Three lines define a judge: judge_<name>_endpoint, judge_<name>_model,
+    judge_<name>_api_key. The judge speaks the SystemOne wire format (like
+    SubQ) on its own endpoint with its own key. Returns {name: {field: value}}
+    with whatever fields were given; completeness is enforced when the judge
+    is actually resolved, so a half-written definition never breaks the
+    built-in judges.
+    """
+    cfg = read_config_file(config_path)
+    found = {}
+    for key, value in cfg.items():
+        if not key.startswith("judge_"):
+            continue
+        for suffix in ("_endpoint", "_model", "_api_key"):
+            if key.endswith(suffix) and len(key) > len("judge_") + len(suffix):
+                name = key[len("judge_"):-len(suffix)]
+                found.setdefault(name, {})[suffix[1:]] = value
+                break
+    for name in found:
+        if name in BUILTIN_JUDGES:
+            raise ClefError(
+                f"custom judge name {name!r} collides with a built-in judge; "
+                "pick another name in the config file")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name):
+            raise ClefError(
+                f"custom judge name {name!r} is invalid; use lowercase letters, "
+                "digits, '-' or '_', starting with a letter or digit")
+    return found
+
+
+def registered_judges(config_path=None):
+    """All judges that can be named: the built-ins plus config-defined
+    custom judges, in definition order."""
+    return BUILTIN_JUDGES + tuple(custom_judges(config_path))
+
+
+def resolve_custom_judge(name, config_path=None):
+    """Full definition for a custom judge, or a ClefError naming what is
+    missing. The key may come from $JUDGE_<NAME>_API_KEY instead of the
+    config file; the Experiential key chain is never consulted."""
+    defs = custom_judges(config_path)
+    if name not in defs:
+        known = ", ".join(registered_judges(config_path))
+        raise ClefError(f"unknown judge {name!r}; registered judges: {known}")
+    d = dict(defs[name])
+    env_key = os.environ.get("JUDGE_" + name.upper().replace("-", "_") + "_API_KEY")
+    if env_key:
+        d["api_key"] = env_key
+    missing = [f"judge_{name}_{k}=" for k in ("endpoint", "model", "api_key")
+               if not d.get(k)]
+    if missing:
+        raise ClefError(
+            f"custom judge {name!r} is missing config: {', '.join(missing)} "
+            "(the api_key may instead come from "
+            f"$JUDGE_{name.upper().replace('-', '_')}_API_KEY)")
+    if not d["endpoint"].startswith("https://"):
+        raise ClefError(
+            f"custom judge {name!r} endpoint must be an https:// URL "
+            f"(got {d['endpoint']!r})")
+    return d
+
+
+def parse_judge_list(text, config_path=None):
+    """Parse a comma-separated judge list into an ordered, deduped list of
+    registered judge names. Unknown names fail loudly."""
+    names = []
+    for part in str(text).split(","):
+        n = part.strip()
+        if n and n not in names:
+            names.append(n)
+    if not names:
+        raise ClefError("panel judge list is empty; name at least one judge")
+    known = registered_judges(config_path)
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        raise ClefError(
+            f"unknown panel judge(s): {', '.join(unknown)}; "
+            f"registered judges: {', '.join(known)}")
+    return names
+
+
+def resolve_panel_judges(flag_value=None, config_path=None):
+    """Panel composition by preference, first source found wins:
+    --panel-judges flag > $PANEL_JUDGES > panel_judges= in the config file
+    > every registered judge. Add or remove a judge by editing that list."""
+    if flag_value:
+        return parse_judge_list(flag_value, config_path)
+    env = os.environ.get(PANEL_JUDGES_ENV)
+    if env:
+        return parse_judge_list(env, config_path)
+    cfg = read_config_file(config_path)
+    if cfg.get("panel_judges"):
+        return parse_judge_list(cfg["panel_judges"], config_path)
+    return list(registered_judges(config_path))
+
+
 def resolve_key(flag_value=None, config_path=None):
     """Standard key precedence: flag > $CLEF_API_KEY > $EXPERIENTIAL_API_KEY
     (legacy) > config file. Never prompts, never logs."""
@@ -255,14 +372,23 @@ def resolve_subq_endpoint(config_path=None):
     return ep
 
 
-def resolve_judge(judge, model_flag=None):
-    """Map --judge to (route, model). route is 'systemone', 'decisions', or 'subq'.
+def resolve_judge(judge, model_flag=None, config_path=None):
+    """Map --judge to (route, model). route is 'systemone', 'decisions',
+    'subq', or 'custom' (a config-defined judge).
 
     --model overrides the SystemOne model string (still allowlisted).
-    Luna's and SubQ's models are fixed; --model with either is rejected.
+    Luna's, SubQ's, and custom judges' models are fixed by their
+    definitions; --model with any of them is rejected.
     """
-    if judge not in JUDGES:
-        raise ClefError(f"judge must be one of {JUDGES} (got {judge!r})")
+    if judge not in BUILTIN_JUDGES:
+        if judge in custom_judges(config_path):
+            if model_flag is not None:
+                raise ClefError(
+                    f"--model cannot be combined with --judge {judge} "
+                    "(a custom judge's model is fixed by its config definition)")
+            return ("custom", resolve_custom_judge(judge, config_path)["model"])
+        known = ", ".join(registered_judges(config_path))
+        raise ClefError(f"unknown judge {judge!r}; registered judges: {known}")
     if judge == "luna":
         if model_flag is not None:
             raise ClefError("--model cannot be combined with --judge luna "
@@ -376,6 +502,18 @@ def call_luna(state, questions, timeout=DEFAULT_TIMEOUT,
     return payload, est
 
 
+def _call_systemone_wire(model, url, key, state, questions,
+                         timeout=DEFAULT_TIMEOUT, _opener=None):
+    """One POST in the SystemOne wire format to an explicit endpoint with
+    an explicit key. Shared by SubQ and config-defined custom judges.
+    No retries; same question and answers shapes as Clef."""
+    validate_questions(questions)
+    state_text = state if isinstance(state, str) else json.dumps(state, sort_keys=True)
+    est = check_context_budget(state_text, questions)
+    payload = _post(url, key, build_body(model, state, questions), timeout, _opener)
+    return payload, est
+
+
 def call_subq(state, questions, timeout=DEFAULT_TIMEOUT,
               endpoint=None, config_path=None, _opener=None):
     """POST to SubQ's SystemOne-compatible endpoint. No retries.
@@ -386,11 +524,21 @@ def call_subq(state, questions, timeout=DEFAULT_TIMEOUT,
     """
     key = resolve_subq_key(config_path)
     url = endpoint or resolve_subq_endpoint(config_path)
-    validate_questions(questions)
-    state_text = state if isinstance(state, str) else json.dumps(state, sort_keys=True)
-    est = check_context_budget(state_text, questions)
-    payload = _post(url, key, build_body(SUBQ_MODEL, state, questions), timeout, _opener)
-    return payload, est
+    return _call_systemone_wire(SUBQ_MODEL, url, key, state, questions,
+                                timeout, _opener)
+
+
+def call_custom(name, state, questions, timeout=DEFAULT_TIMEOUT,
+                config_path=None, _opener=None):
+    """POST to a config-defined custom judge's endpoint. No retries.
+
+    The judge's endpoint, model, and key all come from its config
+    definition (judge_<name>_endpoint / _model / _api_key, key overridable
+    via $JUDGE_<NAME>_API_KEY). Same SystemOne wire format as SubQ.
+    """
+    d = resolve_custom_judge(name, config_path)
+    return _call_systemone_wire(d["model"], d["endpoint"], d["api_key"],
+                                state, questions, timeout, _opener)
 
 
 def _probs_dict(probs):
@@ -404,13 +552,16 @@ def call_judge(judge, state, questions, timeout=DEFAULT_TIMEOUT,
                api_key=None, endpoint=None, luna_endpoint=None,
                config_path=None, model=None, _opener=None, subq_endpoint=None):
     """Dispatch to the judge's native route. Returns (payload, est)."""
-    route, resolved_model = resolve_judge(judge, model)
+    route, resolved_model = resolve_judge(judge, model, config_path)
     if route == "decisions":
         return call_luna(state, questions, timeout, api_key, luna_endpoint,
                          config_path, _opener)
     if route == "subq":
         return call_subq(state, questions, timeout, subq_endpoint,
                          config_path, _opener)
+    if route == "custom":
+        return call_custom(judge, state, questions, timeout,
+                           config_path, _opener)
     return call_clef(resolved_model, state, questions, timeout, api_key,
                      endpoint, config_path, _opener)
 
@@ -428,14 +579,16 @@ def _judge_vote(judge, state_text, qid, question, timeout, api_key,
 
 def panel_vote(state, questions, timeout=DEFAULT_TIMEOUT, api_key=None,
                endpoint=None, luna_endpoint=None, config_path=None,
-               _opener=None, _judge_fn=None, subq_endpoint=None):
+               _opener=None, _judge_fn=None, subq_endpoint=None, judges=None):
     """Tribunal vote over exactly one choice question.
 
-    Every judge weighs the question on its native route and casts one vote.
-    Majority wins. A tie re-runs once (new votes, not retried requests);
-    a second tie escalates: winner is None and the caller must not auto-pick.
-    Returns a dict with qid, options, rounds, votes, counts, winner, tie,
-    and mean_probabilities.
+    Every judge on the panel weighs the question on its native route and
+    casts one vote. The panel is `judges` when given, else the composition
+    preference (see resolve_panel_judges): add or remove judges there, not
+    in code. Majority wins. A tie re-runs once (new votes, not retried
+    requests); a second tie escalates: winner is None and the caller must
+    not auto-pick. Returns a dict with qid, options, rounds, votes, counts,
+    winner, tie, and mean_probabilities.
     """
     if not isinstance(questions, dict) or len(questions) != 1:
         raise ClefError("--panel needs exactly one question in the questions file")
@@ -447,6 +600,9 @@ def panel_vote(state, questions, timeout=DEFAULT_TIMEOUT, api_key=None,
     state_text = state if isinstance(state, str) else json.dumps(state, sort_keys=True)
     check_context_budget(state_text, questions)
     options = list(question["criteria"].keys())
+    panel = list(judges) if judges is not None else resolve_panel_judges(None, config_path)
+    if not panel:
+        raise ClefError("the panel is empty; add at least one judge")
 
     vote_fn = _judge_fn or (lambda j: _judge_vote(
         j, state_text, qid, question, timeout, api_key,
@@ -465,8 +621,8 @@ def panel_vote(state, questions, timeout=DEFAULT_TIMEOUT, api_key=None,
     rounds = []
     for _ in range(2):
         votes, probs = {}, {}
-        with cf.ThreadPoolExecutor(max_workers=len(JUDGES)) as ex:
-            futs = {ex.submit(attributed, j): j for j in JUDGES}
+        with cf.ThreadPoolExecutor(max_workers=len(panel)) as ex:
+            futs = {ex.submit(attributed, j): j for j in panel}
             for f in cf.as_completed(futs):
                 j = futs[f]
                 choice, p = f.result()
@@ -486,7 +642,7 @@ def panel_vote(state, questions, timeout=DEFAULT_TIMEOUT, api_key=None,
     leaders = [c for c, n in final["counts"].items() if n == top]
     mean = {}
     for opt in options:
-        vals = [probs.get(j, {}).get(opt, 0.0) for j in JUDGES]
+        vals = [probs.get(j, {}).get(opt, 0.0) for j in panel]
         mean[opt] = round(sum(vals) / len(vals), 3)
     return {
         "qid": qid,
@@ -529,7 +685,7 @@ def _skeleton_verdict_line(qid, ans):
 def sot_judge(state, skeleton, goal, judge="clef", timeout=DEFAULT_TIMEOUT,
               api_key=None, endpoint=None, luna_endpoint=None,
               config_path=None, model=None, final_panel=False,
-              _opener=None):
+              _opener=None, panel_judges=None):
     """Skeleton-of-judgment: decompose, expand in parallel, aggregate.
 
     The skeleton is a map of independent sub-questions proposed by the
@@ -579,7 +735,8 @@ def sot_judge(state, skeleton, goal, judge="clef", timeout=DEFAULT_TIMEOUT,
 
     if final_panel:
         result = panel_vote(agg_state, goal, timeout, api_key, endpoint,
-                            luna_endpoint, config_path, _opener)
+                            luna_endpoint, config_path, _opener,
+                            judges=panel_judges)
         return {"skeleton_ids": order, "skeleton": answers,
                 "final": result, "final_panel": True}
     payload, _est = call_judge(judge, agg_state, goal, timeout, api_key,
@@ -642,10 +799,17 @@ def main(argv):
                     help="JSON file: exactly one question, the final verdict (required with --sot)")
     ap.add_argument("--final-panel", action="store_true",
                     help="with --sot: send the goal to the full tribunal instead of the single judge")
-    ap.add_argument("--judge", default=None, choices=JUDGES,
-                    help="which judge drives (default: clef; luna uses the decisions route, choice only)")
+    ap.add_argument("--judge", default=None,
+                    help="which judge drives (default: clef; registered judges are the "
+                         "built-ins clef, clef-flash, jev, luna, subq plus any custom "
+                         "judges defined in the config file; luna uses the decisions "
+                         "route, choice only)")
     ap.add_argument("--panel", action="store_true",
-                    help="tribunal vote: all four judges vote on one choice question, majority wins")
+                    help="tribunal vote: the configured panel votes on one choice "
+                         "question, majority wins")
+    ap.add_argument("--panel-judges", default=None,
+                    help="comma-separated panel composition for this run "
+                         "(overrides $PANEL_JUDGES and the config file's panel_judges=)")
     ap.add_argument("--model", default=None,
                     help="SystemOne model override (clef, clef-flash, jev-latest; :free preserved). Not for luna.")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="bounded seconds (no retries)")
@@ -673,11 +837,18 @@ def main(argv):
                 skeleton = json.load(f)
             with open(args.goal_file, "r", encoding="utf-8") as f:
                 goal = json.load(f)
+            panel_judges = None
+            if args.final_panel:
+                panel_judges = resolve_panel_judges(args.panel_judges)
+            elif args.panel_judges is not None:
+                raise ClefError("--panel-judges only applies with --panel "
+                                "or --sot --final-panel")
             result = sot_judge(state, skeleton, goal, judge=args.judge or "clef",
                                timeout=args.timeout, api_key=args.api_key,
                                endpoint=args.endpoint,
                                luna_endpoint=args.luna_endpoint,
-                               model=args.model, final_panel=args.final_panel)
+                               model=args.model, final_panel=args.final_panel,
+                               panel_judges=panel_judges)
             if args.json:
                 print(json.dumps(result, indent=2))
             else:
@@ -685,6 +856,9 @@ def main(argv):
             if result["final_panel"]:
                 return 0 if result["final"]["winner"] else 2
             return 0
+        if args.panel_judges is not None and not args.panel:
+            raise ClefError("--panel-judges only applies with --panel "
+                            "or --sot --final-panel")
         if args.questions is None:
             raise ClefError("--questions is required "
                             "(or --sot with --skeleton-file/--goal-file)")
@@ -692,11 +866,12 @@ def main(argv):
             questions = json.load(f)
         if args.panel:
             if args.judge is not None or args.model is not None:
-                raise ClefError("--panel uses all five judges; it cannot be "
-                                "combined with --judge or --model")
+                raise ClefError("--panel uses the configured panel; it cannot "
+                                "be combined with --judge or --model")
             result = panel_vote(state, questions, timeout=args.timeout,
                                 api_key=args.api_key, endpoint=args.endpoint,
-                                luna_endpoint=args.luna_endpoint)
+                                luna_endpoint=args.luna_endpoint,
+                                judges=resolve_panel_judges(args.panel_judges))
             if args.json:
                 print(json.dumps(result, indent=2))
             else:

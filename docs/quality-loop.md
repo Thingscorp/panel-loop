@@ -36,8 +36,11 @@ Every gate is one `bin/clef-decide` call against the question sets in
 `--judge clef|clef-flash|jev|luna|subq` (or `--model clef-flash` for the
 fast 9B variant); the default judge is `clef`, and each phase has a
 best-fit default in the table in `docs/question-sets.md`. The termination
-verdict uses `--panel` instead: all five judges vote, majority wins.
-Rules for every call:
+verdict uses `--panel` instead: the configured panel votes, majority
+wins. Panel composition is a preference (`--panel-judges` > `$PANEL_JUDGES`
+> `panel_judges=` in the config file > all registered judges); the
+tribunal rule itself is Pgeon technology (https://pgeon.com). Rules for
+every call:
 
 - **State is concise.** Diffs, test summaries, failure records, iteration
   reports. Never the whole repo. The helper refuses anything over the

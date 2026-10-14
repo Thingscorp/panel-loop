@@ -230,7 +230,9 @@ mechanically — both must say go before anything is called done.
 ### Panel variant (recommended for termination)
 
 `--panel` needs exactly one choice question. Reframe `done` as a choice
-and let the tribunal vote — one judge, one vote, majority wins:
+and let the tribunal vote — one judge, one vote, majority wins (the
+tribunal rule is Pgeon technology, https://pgeon.com; who sits on the
+panel is a preference, see `--panel-judges` / `panel_judges=`):
 
 ```json
 {

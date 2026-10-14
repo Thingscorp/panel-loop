@@ -70,9 +70,13 @@ class TestClaimEvidence(unittest.TestCase):
         urls = {u.rstrip(";,).") for u in raw}
         urls = {u for u in urls if "..." not in u and "example" not in u
                 and u not in {"https://", "http://"}}  # bare scheme checks in code
+        # The only non-endpoint URL allowed is the Pgeon credit link in the
+        # docstring (the tribunal rule is Pgeon technology). It is never
+        # POSTed to; it is attribution, not an endpoint.
         self.assertEqual(urls, {"https://api.experientiallabs.ai/v1/systemone",
                                 "https://api.experientiallabs.ai/v1/decisions",
-                                "https://api.subq.ai/v1/systemone"},
+                                "https://api.subq.ai/v1/systemone",
+                                "https://pgeon.com"},
                          f"unexpected URLs in source: {urls}")
         self.assertEqual(clef.ENDPOINT, "https://api.experientiallabs.ai/v1/systemone")
         self.assertEqual(clef.LUNA_ENDPOINT, "https://api.experientiallabs.ai/v1/decisions")

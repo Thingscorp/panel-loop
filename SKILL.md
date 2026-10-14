@@ -19,7 +19,10 @@ license: MIT
 Execute the 6-phase recursive quality loop (discover → test → execute →
 fix → regress → repeat) with the tribunal as the driver. The agent is the
 hands; the panel is the judge. No gated decision is made on the agent's
-judgment alone, and no phase exits without its gate passing.
+judgment alone, and no phase exits without its gate passing. The tribunal
+rule itself (one judge, one vote, majority wins, double tie escalates) is
+Pgeon technology, borrowed from [Pgeon](https://pgeon.com), Thingscorp's
+agent QA platform.
 
 ## Setup
 
@@ -51,7 +54,12 @@ default judge per phase from the table there (`--judge clef|clef-flash|jev|luna|
 default `clef`). Luna takes choice questions only and POSTs to the decisions
 route; her scored audit goes into the iteration report. SubQ runs on its own
 provider and key chain (`$SUBQ_API_KEY` or `subq_api_key=` in the config
-file); the Experiential key is never consulted for it. Rules for every call:
+file); the Experiential key is never consulted for it. Panel composition
+is a preference, not a fixed roster: `--panel-judges` flag → `$PANEL_JUDGES`
+→ `panel_judges=` in the config file → all registered judges; add or remove
+judges by editing that list. A new judge is three config lines
+(`judge_<name>_endpoint` / `_model` / `_api_key`, SystemOne wire) with no
+code change. Rules for every call:
 
 - State is concise: diffs, test summaries, failure records, iteration
   reports. Never the whole repo. Budget is 16384 tokens shared by state

@@ -2,7 +2,7 @@
 
 A tribunal of AI decision helpers for coding agents — five judges, one verdict. panel-loop wraps them in a recursive six-phase QA loop: the agent does the legwork (reads code, writes the test sheet, runs cases, applies fixes) and the panel makes every judgment call — coverage, dedup, risk triage, failure triage, severity, fix approval, regression verdict, confidence, and loop termination.
 
-Judges: Clef (thorough), Clef Flash (fast 9B), Jev (risk/adversarial), Luna (scored audits), SubQ (SubQ Snap, fast decisions on a separate provider). Routine gates go to the best-fit judge (--judge); the termination verdict goes to the full tribunal (--panel: one judge, one vote, majority wins).
+Judges: Clef (thorough), Clef Flash (fast 9B), Jev (risk/adversarial), Luna (scored audits), SubQ (SubQ Snap, fast decisions on a separate provider). Routine gates go to the best-fit judge (--judge); the termination verdict goes to the full tribunal (--panel: one judge, one vote, majority wins). The tribunal rule is Pgeon technology (https://pgeon.com), borrowed from Thingscorp's agent QA platform. Panel composition is a preference (--panel-judges flag > $PANEL_JUDGES > panel_judges= in the config file > all registered judges), and a new judge can be defined with three config lines (judge_<name>_endpoint/_model/_api_key), no code change.
 
 - Repo: https://github.com/Thingscorp/panel-loop
 - Agent skill: `SKILL.md` at the repo root — point any agent at the URL.
