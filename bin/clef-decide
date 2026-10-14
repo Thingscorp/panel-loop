@@ -5,13 +5,14 @@ Clef is a DECISION HELPER, not a chat model. It answers structured questions
 (choice / noul / score) about a state blob. It does not generate chat
 completions and must never be used as the coding agent's primary model.
 
-Four judges can drive the loop, each with a native route (--judge):
+Five judges can drive the loop, each with a native route (--judge):
   clef       SystemOne, the thorough reader (default)
   clef-flash SystemOne, 9B, fast — high-volume cheap gates
   jev        SystemOne, risk triage and adversarial second opinions
   luna       the /v1/decisions route, structured scored audits (choice only)
+  subq       SubQ Snap, SystemOne-compatible fast decisions on api.subq.ai
 
---panel fans one choice question out to all four judges in parallel.
+--panel fans one choice question out to all five judges in parallel.
 Tribunal rule, borrowed from the pgeon tribunal: one judge, one vote;
 majority wins; a tie re-runs once, then escalates (exit 2, no auto-pick).
 
@@ -28,10 +29,13 @@ Hard rules (from the integration spec):
   Missing everywhere: stops with setup instructions. The key is never
   requested interactively, never logged. Prefer the env var or config
   file — a CLI flag can appear in shell history and process listings.
+- SubQ is a separate provider with its own key: $SUBQ_API_KEY or
+  subq_api_key= in ~/.config/clef-decide/config. The Experiential key
+  chain is never consulted for the subq judge.
 - Model sent as "clef", "clef-flash", or "jev-latest" exactly (a ":free"
   suffix spelling is preserved if explicitly selected). Anything else is
   rejected — these are decision helpers, not chat models. Luna's model is
-  fixed: gpt-6-luna-decisions.
+  fixed: gpt-6-luna-decisions. SubQ's model is fixed: subq-snap-preview.
 - No retries, no Idempotency-Key: an unknown outcome may already be charged.
   (The panel's single tie re-run is a new vote, not a retried request.)
 - Bounded timeout. HTTP/transport errors surface, nothing is hidden.
@@ -58,6 +62,8 @@ Config file (~/.config/clef-decide/config), KEY=VALUE lines, # comments:
     api_key=...
     endpoint=https://...       (SystemOne route)
     luna_endpoint=https://...  (decisions route)
+    subq_api_key=...          (separate provider, only for --judge subq)
+    subq_endpoint=https://...  (SubQ route)
 
 questions.json shape:
     {
@@ -81,15 +87,20 @@ ENDPOINT = "https://api.experientiallabs.ai/v1/systemone"
 LUNA_ENDPOINT = "https://api.experientiallabs.ai/v1/decisions"
 LUNA_MODEL = "gpt-6-luna-decisions"
 JEV_MODEL = "jev-latest"
+SUBQ_ENDPOINT = "https://api.subq.ai/v1/systemone"
+SUBQ_MODEL = "subq-snap-preview"
 KEY_ENV = "CLEF_API_KEY"
 LEGACY_KEY_ENV = "EXPERIENTIAL_API_KEY"
+SUBQ_KEY_ENV = "SUBQ_API_KEY"
 ENDPOINT_ENV = "CLEF_ENDPOINT"
 LUNA_ENDPOINT_ENV = "LUNA_ENDPOINT"
+SUBQ_ENDPOINT_ENV = "SUBQ_ENDPOINT"
 DEFAULT_CONFIG_PATH = os.path.join(
     os.path.expanduser("~"), ".config", "clef-decide", "config")
 DEFAULT_MODEL = "clef"
-JUDGES = ("clef", "clef-flash", "jev", "luna")
-JUDGE_DEFAULT_MODEL = {"clef": "clef", "clef-flash": "clef-flash", "jev": JEV_MODEL}
+JUDGES = ("clef", "clef-flash", "jev", "luna", "subq")
+JUDGE_DEFAULT_MODEL = {"clef": "clef", "clef-flash": "clef-flash", "jev": JEV_MODEL,
+                       "subq": SUBQ_MODEL}
 ALLOWED_MODELS = ("clef", "clef-flash", "jev-latest")
 DEFAULT_TIMEOUT = 60
 
@@ -218,11 +229,37 @@ def resolve_luna_endpoint(flag_value=None, config_path=None):
     return ep
 
 
+def resolve_subq_key(config_path=None):
+    """SubQ key precedence: $SUBQ_API_KEY > subq_api_key= in config file.
+    SubQ is a separate provider with its own key; the Experiential key
+    chain is never consulted. Never prompts, never logs."""
+    v = os.environ.get(SUBQ_KEY_ENV)
+    if v:
+        return v
+    cfg = read_config_file(config_path)
+    if cfg.get("subq_api_key"):
+        return cfg["subq_api_key"]
+    raise ClefError(
+        "no SubQ API key found. Provide one via $SUBQ_API_KEY "
+        "or subq_api_key= in ~/.config/clef-decide/config"
+    )
+
+
+def resolve_subq_endpoint(config_path=None):
+    """SubQ endpoint precedence: $SUBQ_ENDPOINT > config file > default."""
+    ep = (os.environ.get(SUBQ_ENDPOINT_ENV)
+          or read_config_file(config_path).get("subq_endpoint")
+          or SUBQ_ENDPOINT)
+    if not ep.startswith("https://"):
+        raise ClefError(f"subq endpoint must be an https:// URL (got {ep!r})")
+    return ep
+
+
 def resolve_judge(judge, model_flag=None):
-    """Map --judge to (route, model). route is 'systemone' or 'decisions'.
+    """Map --judge to (route, model). route is 'systemone', 'decisions', or 'subq'.
 
     --model overrides the SystemOne model string (still allowlisted).
-    Luna's model is fixed; --model with --judge luna is rejected.
+    Luna's and SubQ's models are fixed; --model with either is rejected.
     """
     if judge not in JUDGES:
         raise ClefError(f"judge must be one of {JUDGES} (got {judge!r})")
@@ -231,6 +268,11 @@ def resolve_judge(judge, model_flag=None):
             raise ClefError("--model cannot be combined with --judge luna "
                             f"(Luna's model is fixed: {LUNA_MODEL})")
         return ("decisions", LUNA_MODEL)
+    if judge == "subq":
+        if model_flag is not None:
+            raise ClefError("--model cannot be combined with --judge subq "
+                            f"(SubQ's model is fixed: {SUBQ_MODEL})")
+        return ("subq", SUBQ_MODEL)
     model = model_flag or JUDGE_DEFAULT_MODEL[judge]
     base = model.split(":")[0]
     if base not in ALLOWED_MODELS:
@@ -334,6 +376,23 @@ def call_luna(state, questions, timeout=DEFAULT_TIMEOUT,
     return payload, est
 
 
+def call_subq(state, questions, timeout=DEFAULT_TIMEOUT,
+              endpoint=None, config_path=None, _opener=None):
+    """POST to SubQ's SystemOne-compatible endpoint. No retries.
+
+    Same question shapes as Clef (choice / noul / score) and the same
+    answers shape, so the response needs no normalization. SubQ carries
+    its own key: $SUBQ_API_KEY or subq_api_key= in the config file.
+    """
+    key = resolve_subq_key(config_path)
+    url = endpoint or resolve_subq_endpoint(config_path)
+    validate_questions(questions)
+    state_text = state if isinstance(state, str) else json.dumps(state, sort_keys=True)
+    est = check_context_budget(state_text, questions)
+    payload = _post(url, key, build_body(SUBQ_MODEL, state, questions), timeout, _opener)
+    return payload, est
+
+
 def _probs_dict(probs):
     """Normalize probabilities to {option: float}, list or dict form."""
     if isinstance(probs, list):
@@ -343,29 +402,33 @@ def _probs_dict(probs):
 
 def call_judge(judge, state, questions, timeout=DEFAULT_TIMEOUT,
                api_key=None, endpoint=None, luna_endpoint=None,
-               config_path=None, model=None, _opener=None):
+               config_path=None, model=None, _opener=None, subq_endpoint=None):
     """Dispatch to the judge's native route. Returns (payload, est)."""
     route, resolved_model = resolve_judge(judge, model)
     if route == "decisions":
         return call_luna(state, questions, timeout, api_key, luna_endpoint,
+                         config_path, _opener)
+    if route == "subq":
+        return call_subq(state, questions, timeout, subq_endpoint,
                          config_path, _opener)
     return call_clef(resolved_model, state, questions, timeout, api_key,
                      endpoint, config_path, _opener)
 
 
 def _judge_vote(judge, state_text, qid, question, timeout, api_key,
-                endpoint, luna_endpoint, config_path, _opener):
+                endpoint, luna_endpoint, config_path, _opener,
+                subq_endpoint=None):
     """One judge, one vote: weigh natively, return (choice, probs dict)."""
     payload, _ = call_judge(judge, state_text, {qid: question}, timeout,
                             api_key, endpoint, luna_endpoint, config_path,
-                            _opener=_opener)
+                            _opener=_opener, subq_endpoint=subq_endpoint)
     ans = payload["answers"][qid]
     return ans.get("choice"), _probs_dict(ans.get("probabilities", {}))
 
 
 def panel_vote(state, questions, timeout=DEFAULT_TIMEOUT, api_key=None,
                endpoint=None, luna_endpoint=None, config_path=None,
-               _opener=None, _judge_fn=None):
+               _opener=None, _judge_fn=None, subq_endpoint=None):
     """Tribunal vote over exactly one choice question.
 
     Every judge weighs the question on its native route and casts one vote.
@@ -387,7 +450,8 @@ def panel_vote(state, questions, timeout=DEFAULT_TIMEOUT, api_key=None,
 
     vote_fn = _judge_fn or (lambda j: _judge_vote(
         j, state_text, qid, question, timeout, api_key,
-        endpoint, luna_endpoint, config_path, _opener))
+        endpoint, luna_endpoint, config_path, _opener,
+        subq_endpoint=subq_endpoint))
 
     def attributed(judge):
         try:
@@ -628,7 +692,7 @@ def main(argv):
             questions = json.load(f)
         if args.panel:
             if args.judge is not None or args.model is not None:
-                raise ClefError("--panel uses all four judges; it cannot be "
+                raise ClefError("--panel uses all five judges; it cannot be "
                                 "combined with --judge or --model")
             result = panel_vote(state, questions, timeout=args.timeout,
                                 api_key=args.api_key, endpoint=args.endpoint,

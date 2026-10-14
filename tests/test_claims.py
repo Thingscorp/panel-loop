@@ -71,10 +71,12 @@ class TestClaimEvidence(unittest.TestCase):
         urls = {u for u in urls if "..." not in u and "example" not in u
                 and u not in {"https://", "http://"}}  # bare scheme checks in code
         self.assertEqual(urls, {"https://api.experientiallabs.ai/v1/systemone",
-                                "https://api.experientiallabs.ai/v1/decisions"},
+                                "https://api.experientiallabs.ai/v1/decisions",
+                                "https://api.subq.ai/v1/systemone"},
                          f"unexpected URLs in source: {urls}")
         self.assertEqual(clef.ENDPOINT, "https://api.experientiallabs.ai/v1/systemone")
         self.assertEqual(clef.LUNA_ENDPOINT, "https://api.experientiallabs.ai/v1/decisions")
+        self.assertEqual(clef.SUBQ_ENDPOINT, "https://api.subq.ai/v1/systemone")
 
     def test_no_retry_on_transport_error(self):
         cap = {}
@@ -111,8 +113,9 @@ class TestClaimEvidence(unittest.TestCase):
 
     def test_model_allowlist_pinned(self):
         self.assertEqual(clef.ALLOWED_MODELS, ("clef", "clef-flash", "jev-latest"))
-        self.assertEqual(clef.JUDGES, ("clef", "clef-flash", "jev", "luna"))
+        self.assertEqual(clef.JUDGES, ("clef", "clef-flash", "jev", "luna", "subq"))
         self.assertEqual(clef.LUNA_MODEL, "gpt-6-luna-decisions")
+        self.assertEqual(clef.SUBQ_MODEL, "subq-snap-preview")
         self.assertEqual(clef.DEFAULT_MODEL, "clef")
 
     def test_helper_is_executable(self):

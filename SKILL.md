@@ -6,7 +6,7 @@ description: >-
   implements fixes); the panel makes every judgment call — coverage, dedup,
   risk triage, failure triage, severity, fix approval, regression verdict,
   confidence, and loop termination — through bin/clef-decide. Judges: Clef,
-  Clef Flash, Jev, Luna; the termination verdict goes to a full tribunal
+  Clef Flash, Jev, Luna, SubQ; the termination verdict goes to a full tribunal
   vote. Use when the owner says "let the panel drive", "tribunal QA",
   or drops panel-loop into a repo for a full quality pass.
 license: MIT
@@ -30,7 +30,8 @@ export CLEF_API_KEY=...   # or api_key= in ~/.config/clef-decide/config
 
 Key precedence (standard): `--api-key` flag → `$CLEF_API_KEY` →
 `$EXPERIENTIAL_API_KEY` (legacy) → config file. The key is never prompted
-for, never logged. Every claim in this skill's README is backed by a test
+for, never logged. SubQ is the exception: its own chain (`$SUBQ_API_KEY` →
+`subq_api_key=` in the config file), never the Experiential key. Every claim in this skill's README is backed by a test
 in `tests/` — run `python3 -m unittest discover -s tests` to see the
 evidence.
 
@@ -46,9 +47,11 @@ Status, Defect Count, Severity, Notes, Last Tested Date. IDs `F-001`,
 
 **Driving.** Every gate is one `bin/clef-decide` call. Concrete question sets live in
 `docs/question-sets.md` — use them verbatim, filling in the IDs, with the
-default judge per phase from the table there (`--judge clef|clef-flash|jev|luna`;
+default judge per phase from the table there (`--judge clef|clef-flash|jev|luna|subq`;
 default `clef`). Luna takes choice questions only and POSTs to the decisions
-route; her scored audit goes into the iteration report. Rules for every call:
+route; her scored audit goes into the iteration report. SubQ runs on its own
+provider and key chain (`$SUBQ_API_KEY` or `subq_api_key=` in the config
+file); the Experiential key is never consulted for it. Rules for every call:
 
 - State is concise: diffs, test summaries, failure records, iteration
   reports. Never the whole repo. Budget is 16384 tokens shared by state

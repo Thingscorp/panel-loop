@@ -1,7 +1,7 @@
 # Panel question sets for the quality loop
 
 Use these verbatim, filling in the IDs. The sets are judge-agnostic: any
-judge on the panel (Clef, Clef Flash, Jev, Luna) can answer any set, and
+judge on the panel (Clef, Clef Flash, Jev, Luna, SubQ) can answer any set, and
 the default judge table below assigns each gate to its best-fit judge.
 State shapes are suggestions — keep state concise (diffs, summaries,
 records, reports), never the repo.

@@ -1,8 +1,8 @@
 # panel-loop
 
-A tribunal of AI decision helpers for coding agents — four judges, one verdict. panel-loop wraps them in a recursive six-phase QA loop: the agent does the legwork (reads code, writes the test sheet, runs cases, applies fixes) and the panel makes every judgment call — coverage, dedup, risk triage, failure triage, severity, fix approval, regression verdict, confidence, and loop termination.
+A tribunal of AI decision helpers for coding agents — five judges, one verdict. panel-loop wraps them in a recursive six-phase QA loop: the agent does the legwork (reads code, writes the test sheet, runs cases, applies fixes) and the panel makes every judgment call — coverage, dedup, risk triage, failure triage, severity, fix approval, regression verdict, confidence, and loop termination.
 
-Judges: Clef (thorough), Clef Flash (fast 9B), Jev (risk/adversarial), Luna (scored audits). Routine gates go to the best-fit judge (--judge); the termination verdict goes to the full tribunal (--panel: one judge, one vote, majority wins).
+Judges: Clef (thorough), Clef Flash (fast 9B), Jev (risk/adversarial), Luna (scored audits), SubQ (SubQ Snap, fast decisions on a separate provider). Routine gates go to the best-fit judge (--judge); the termination verdict goes to the full tribunal (--panel: one judge, one vote, majority wins).
 
 - Repo: https://github.com/Thingscorp/panel-loop
 - Agent skill: `SKILL.md` at the repo root — point any agent at the URL.
@@ -16,4 +16,4 @@ bin/clef-decide --state-file state.md --questions questions.json [--judge jev]
 bin/clef-decide --state-file report.md --questions done.json --panel
 ```
 
-Key chain: `--api-key` → `$CLEF_API_KEY` → `$EXPERIENTIAL_API_KEY` (legacy) → `api_key=` in `~/.config/clef-decide/config`. SystemOne models: `clef` (default), `clef-flash`, `jev-latest` (`:free` suffix preserved). Luna (`gpt-6-luna-decisions`, fixed) uses the decisions route, choice questions only. Question types: `choice`, `noul`, `score` — see `docs/question-sets.md` for the per-phase sets and default judge table.
+Key chain: `--api-key` → `$CLEF_API_KEY` → `$EXPERIENTIAL_API_KEY` (legacy) → `api_key=` in `~/.config/clef-decide/config`. SystemOne models: `clef` (default), `clef-flash`, `jev-latest` (`:free` suffix preserved). Luna (`gpt-6-luna-decisions`, fixed) uses the decisions route, choice questions only. SubQ (`subq-snap-preview`, fixed) runs on `https://api.subq.ai/v1/systemone` with its own key chain (`$SUBQ_API_KEY` → `subq_api_key=` in the config file); the Experiential key is never consulted for it. Question types: `choice`, `noul`, `score` — see `docs/question-sets.md` for the per-phase sets and default judge table.

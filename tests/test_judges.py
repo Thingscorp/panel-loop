@@ -170,33 +170,40 @@ def ballot(votes):
 class TestPanelVote(unittest.TestCase):
     def test_majority_wins(self):
         res = clef.panel_vote("s", CHOICE_Q, _judge_fn=ballot(
-            {"clef": "done", "clef-flash": "done", "jev": "not_done", "luna": "done"}))
+            {"clef": "done", "clef-flash": "done", "jev": "not_done",
+             "luna": "done", "subq": "done"}))
         self.assertEqual(res["winner"], "done")
         self.assertFalse(res["tie"])
         self.assertEqual(len(res["rounds"]), 1)
-        self.assertAlmostEqual(res["mean_probabilities"]["done"], 0.65)
+        self.assertAlmostEqual(res["mean_probabilities"]["done"], 0.68)
 
     def test_tie_reruns_then_decides(self):
+        # five judges, three options: a 2-2-1 split ties, then resolves
+        three_q = {"done": {"type": "choice", "instructions": "x",
+                            "criteria": {"done": "y", "not_done": "z",
+                                         "maybe": "w"}}}
         calls = {"n": 0}
         def fn(judge):
             calls["n"] += 1
-            # round 1: 2-2 tie; round 2: 3-1
-            first = calls["n"] <= 4
+            first = calls["n"] <= 5
             c = {"clef": "done", "clef-flash": "done",
-                 "jev": "not_done", "luna": "not_done"}[judge]
+                 "jev": "not_done", "luna": "not_done",
+                 "subq": "maybe"}[judge]
             if not first and judge == "luna":
                 c = "done"
-            other = "not_done" if c == "done" else "done"
-            return c, {c: 0.8, other: 0.2}
-        res = clef.panel_vote("s", CHOICE_Q, _judge_fn=fn)
+            return c, {c: 0.8}
+        res = clef.panel_vote("s", three_q, _judge_fn=fn)
         self.assertEqual(len(res["rounds"]), 2)
         self.assertEqual(res["winner"], "done")
         self.assertFalse(res["tie"])
 
     def test_double_tie_escalates(self):
-        res = clef.panel_vote("s", CHOICE_Q, _judge_fn=ballot(
+        three_q = {"done": {"type": "choice", "instructions": "x",
+                            "criteria": {"done": "y", "not_done": "z",
+                                         "maybe": "w"}}}
+        res = clef.panel_vote("s", three_q, _judge_fn=ballot(
             {"clef": "done", "clef-flash": "done",
-             "jev": "not_done", "luna": "not_done"}))
+             "jev": "not_done", "luna": "not_done", "subq": "maybe"}))
         self.assertEqual(len(res["rounds"]), 2)
         self.assertIsNone(res["winner"])
         self.assertTrue(res["tie"])
@@ -231,11 +238,12 @@ class TestPanelVote(unittest.TestCase):
             raise clef.ClefError("down")
         with self.assertRaises(clef.ClefError):
             clef.panel_vote("s", CHOICE_Q, _judge_fn=fn)
-        self.assertLessEqual(calls["n"], 4)
+        self.assertLessEqual(calls["n"], 5)
 
     def test_render_panel_shows_votes(self):
         res = clef.panel_vote("s", CHOICE_Q, _judge_fn=ballot(
-            {"clef": "done", "clef-flash": "done", "jev": "done", "luna": "done"}))
+            {"clef": "done", "clef-flash": "done", "jev": "done",
+             "luna": "done", "subq": "done"}))
         human = clef.render_panel(res)
         self.assertIn("winner: done", human)
         self.assertIn("clef=done", human)
@@ -283,6 +291,83 @@ class TestPanelFlagConflict(unittest.TestCase):
                           return_value=({"answers": {}}, 1)) as cj:
             clef.main(["--state-file", s, "--questions", q])
         self.assertEqual(cj.call_args[0][0], "clef")
+
+
+def subq_opener(captured, answers=None):
+    def opener(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["auth"] = req.get_header("Authorization")
+        captured["body"] = json.loads(req.data.decode())
+        return FakeResp(answers if answers is not None else {"answers": {}})
+    return opener
+
+
+class TestSubQRoute(unittest.TestCase):
+    def setUp(self):
+        self.env = patch.dict(os.environ, {"SUBQ_API_KEY": "subq-key-dummy"})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+
+    def test_subq_route_and_fixed_model(self):
+        self.assertEqual(clef.resolve_judge("subq"),
+                         ("subq", "subq-snap-preview"))
+
+    def test_subq_rejects_model_flag(self):
+        with self.assertRaises(clef.ClefError) as cm:
+            clef.resolve_judge("subq", "clef")
+        self.assertIn("--model", str(cm.exception))
+
+    def test_subq_posts_to_subq_endpoint_with_systemone_shape(self):
+        cap = {}
+        payload, _ = clef.call_judge(
+            "subq", "state blob", CHOICE_Q,
+            _opener=subq_opener(cap, {"answers": {"done": {
+                "type": "choice", "choice": "done", "confidence": 0.9,
+                "probabilities": {"done": 0.9, "not_done": 0.1}}}}))
+        self.assertEqual(cap["url"], "https://api.subq.ai/v1/systemone")
+        self.assertEqual(cap["body"]["model"], "subq-snap-preview")
+        self.assertEqual(cap["body"]["state"], "state blob")
+        self.assertIn("done", cap["body"]["questions"])
+        self.assertEqual(cap["auth"], "Bearer subq-key-dummy")
+        self.assertEqual(payload["answers"]["done"]["choice"], "done")
+
+    def test_subq_supports_noul_and_score(self):
+        cap = {}
+        q = {"risk": {"type": "noul", "instructions": "risky?"},
+             "sev": {"type": "score", "instructions": "how bad?",
+                     "criteria": ["low", "high"]}}
+        clef.call_judge("subq", "s", q, _opener=subq_opener(cap))
+        self.assertIn("risk", cap["body"]["questions"])
+        self.assertIn("sev", cap["body"]["questions"])
+
+    def test_subq_key_missing_raises(self):
+        # the Experiential key chain must NOT satisfy the subq judge
+        with patch.dict(os.environ, {"EXPERIENTIAL_API_KEY": "wrong-chain"},
+                        clear=True):
+            with self.assertRaises(clef.ClefError) as cm:
+                clef.call_judge("subq", "s", CHOICE_Q,
+                                _opener=subq_opener({}))
+        self.assertIn("SUBQ_API_KEY", str(cm.exception))
+
+    def test_subq_endpoint_precedence(self):
+        self.assertEqual(clef.resolve_subq_endpoint(), "https://api.subq.ai/v1/systemone")
+        with patch.dict(os.environ, {"SUBQ_ENDPOINT": "https://e.test/s"}):
+            self.assertEqual(clef.resolve_subq_endpoint(), "https://e.test/s")
+        with self.assertRaises(clef.ClefError):
+            with patch.dict(os.environ, {"SUBQ_ENDPOINT": "http://x.test/s"}):
+                clef.resolve_subq_endpoint()
+
+    def test_panel_fans_out_to_five_judges(self):
+        seen = []
+        def fn(judge):
+            seen.append(judge)
+            return "done", {"done": 1.0}
+        res = clef.panel_vote("s", CHOICE_Q, _judge_fn=fn)
+        self.assertEqual(sorted(seen),
+                         ["clef", "clef-flash", "jev", "luna", "subq"])
+        self.assertEqual(res["winner"], "done")
 
 
 if __name__ == "__main__":

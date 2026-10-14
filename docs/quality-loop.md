@@ -2,8 +2,8 @@
 
 Six phases, recursive. The agent does the legwork; the panel makes every
 judgment call. Clef is one judge on the panel, not the panel: routine gates
-go to the best-fit judge (Clef, Clef Flash, Jev, or Luna, per the default
-judge table in `docs/question-sets.md`), and the loop-termination verdict
+go to the best-fit judge (Clef, Clef Flash, Jev, Luna, or SubQ, per the
+default judge table in `docs/question-sets.md`), and the loop-termination verdict
 goes to the full tribunal. No gated decision is made on the agent's
 judgment alone, and no phase exits without its gate passing.
 
@@ -33,11 +33,11 @@ Sheet columns (exact names):
 
 Every gate is one `bin/clef-decide` call against the question sets in
 `docs/question-sets.md`, with the IDs filled in. Pick the judge with
-`--judge clef|clef-flash|jev|luna` (or `--model clef-flash` for the fast
-9B variant); the default judge is `clef`, and each phase has a best-fit
-default in the table in `docs/question-sets.md`. The termination verdict
-uses `--panel` instead: all four judges vote, majority wins. Rules for
-every call:
+`--judge clef|clef-flash|jev|luna|subq` (or `--model clef-flash` for the
+fast 9B variant); the default judge is `clef`, and each phase has a
+best-fit default in the table in `docs/question-sets.md`. The termination
+verdict uses `--panel` instead: all five judges vote, majority wins.
+Rules for every call:
 
 - **State is concise.** Diffs, test summaries, failure records, iteration
   reports. Never the whole repo. The helper refuses anything over the

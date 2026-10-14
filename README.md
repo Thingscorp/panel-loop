@@ -1,18 +1,19 @@
 # panel-loop
 
-A **tribunal of AI decision helpers for coding agents** — four judges, one verdict. `panel-loop` wraps them in a **recursive six-phase QA loop**: the agent does the legwork (reads code, writes the test sheet, runs cases, applies fixes) and the panel makes every judgment call — coverage, deduplication, risk triage, failure triage, severity, fix review, regression verdict, confidence, and loop termination.
+A **tribunal of AI decision helpers for coding agents** — five judges, one verdict. `panel-loop` wraps them in a **recursive six-phase QA loop**: the agent does the legwork (reads code, writes the test sheet, runs cases, applies fixes) and the panel makes every judgment call — coverage, deduplication, risk triage, failure triage, severity, fix review, regression verdict, confidence, and loop termination.
 
-The judges: **Clef** (the thorough reader), **Clef Flash** (the fast 9B for high-volume gates), **Jev** (risk triage and adversarial second opinions), **Luna** (structured scored audits). Routine gates go to the best-fit judge; the termination verdict goes to the full tribunal — **one judge, one vote, majority wins**.
+The judges: **Clef** (the thorough reader), **Clef Flash** (the fast 9B for high-volume gates), **Jev** (risk triage and adversarial second opinions), **Luna** (structured scored audits), **SubQ** (SubQ Snap, SystemOne-compatible fast decisions on a separate provider). Routine gates go to the best-fit judge; the termination verdict goes to the full tribunal — **one judge, one vote, majority wins**.
 
 The rule of the loop: **the agent is the hands, the panel is the judge.** No gated decision is made on the agent's judgment alone, and no phase exits without its gate passing. None of these are chat models — they judge; they do not chat, code, or complete.
 
 ## Verified claims
 
-Every claim below is backed by a test in `tests/` — fully mocked, no network, no key, no charges. Run them yourself: `python3 -m unittest discover -s tests` (72/72 pass, ~0.1s).
+Every claim below is backed by a test in `tests/` — fully mocked, no network, no key, no charges. Run them yourself: `python3 -m unittest discover -s tests` (79/79 pass, ~0.1s).
 
 | Claim | Backing data |
 |---|---|
-| POSTs only to the two known endpoints | `test_request_shape` asserts the exact URL and POST method; `test_endpoints_are_the_only_real_urls_in_source` scans `bin/clef-decide` for any other URL — none exists |
+| POSTs only to the three known endpoints | `test_request_shape` asserts the exact URL and POST method; `test_endpoints_are_the_only_real_urls_in_source` scans `bin/clef-decide` for any other URL — none exists |
+| SubQ is a fifth judge on its own endpoint, with its own key chain | `test_subq_posts_to_subq_endpoint_with_systemone_shape`, `test_subq_key_missing_raises`, `test_subq_endpoint_precedence`, `test_panel_fans_out_to_five_judges`; `test_model_allowlist_pinned` pins `JUDGES` and `SUBQ_MODEL` |
 | API key from standard config, never prompted or logged | `test_missing_key_stops` (helper refuses without it); `test_key_never_prompted_interactively` (no `input()`/`getpass` anywhere in source); `tests/test_config.py` proves the full precedence chain |
 | No retries, no idempotency key | `test_no_retry_on_transport_error`: a failed transport produces exactly 1 attempt, never a resend; `test_no_idempotency_header_sent` |
 | 16,384-token budget enforced before sending | `test_context_budget_refuses`; `test_constants_match_claims` pins the constant |
@@ -44,7 +45,7 @@ bin/clef-decide --state-file state.md --questions questions.json --json
 
 ## Judges
 
-`--judge` selects which judge drives the gate (default `clef`). All four share the one API key.
+`--judge` selects which judge drives the gate (default `clef`). Clef, Clef Flash, Jev, and Luna share the one Experiential API key; SubQ is a separate provider with its own key (`$SUBQ_API_KEY` or `subq_api_key=` in the config file).
 
 ```bash
 bin/clef-decide --state-file state.md --questions questions.json --judge jev
@@ -55,18 +56,19 @@ bin/clef-decide --state-file state.md --questions questions.json --model clef-fl
 - `clef-flash` — the 9B variant ([model card](https://huggingface.co/Cloudflare/clef-flash)): same SystemOne wire, no free-form generation, built for speed — median request latency 38.8ms vs 209.3ms for `clef` on the Decision Index suite. Pick it for cheap, fast, high-volume gates.
 - `jev` — SystemOne model `jev-latest`. The risk and adversarial judge: risk triage, second opinions, catching what the others miss.
 - `luna` — the `/v1/decisions` route (model `gpt-6-luna-decisions`, fixed). Structured scored audits with rationale — the audit trail. Choice questions only; use a SystemOne judge for `noul`/`score`.
+- `subq` — SubQ Snap (`subq-snap-preview`, fixed) on `https://api.subq.ai/v1/systemone`, a SystemOne-compatible endpoint. Fast triage judge; supports `choice`, `noul`, and `score` like the other SystemOne judges. Needs its own key: `$SUBQ_API_KEY` or `subq_api_key=` in `~/.config/clef-decide/config`.
 
 Only `clef`, `clef-flash`, and `jev-latest` (plus a `:free` suffix spelling, preserved verbatim) are accepted on the SystemOne route — anything else is rejected, since none of these are chat models. Request shape reference: the [SystemOne quickstart](https://docs.typesafe.ai/introduction/quickstart).
 
 ### Panel votes
 
-`--panel` fans one choice question out to all four judges in parallel and applies the tribunal rule: **one judge, one vote; majority wins.** A tie re-runs once (new votes, not retried requests); a second tie escalates to the owner — the helper exits 2 and never auto-picks.
+`--panel` fans one choice question out to all five judges in parallel and applies the tribunal rule: **one judge, one vote; majority wins.** A tie re-runs once (new votes, not retried requests); a second tie escalates to the owner — the helper exits 2 and never auto-picks.
 
 ```bash
 bin/clef-decide --state-file report.md --questions done.json --panel
 ```
 
-`done.json` must hold exactly one choice question, e.g. `{"done": {"type": "choice", "instructions": "...", "criteria": {"done": "...", "not_done": "..."}}}`. Use the panel for the loop-termination gate (phase 6) and other high-stakes verdicts; routine gates stay single-judge. `--panel` cannot be combined with `--judge` or `--model` — it always uses all four judges, and contradictory flags fail loudly instead of being silently ignored.
+`done.json` must hold exactly one choice question, e.g. `{"done": {"type": "choice", "instructions": "...", "criteria": {"done": "...", "not_done": "..."}}}`. Use the panel for the loop-termination gate (phase 6) and other high-stakes verdicts; routine gates stay single-judge. `--panel` cannot be combined with `--judge` or `--model` — it always uses all five judges, and contradictory flags fail loudly instead of being silently ignored.
 
 ### Skeleton-of-judgment
 
@@ -80,7 +82,7 @@ bin/clef-decide --sot --state-file report.md --skeleton-file skeleton.json --goa
 - `--skeleton-file`: map of point ID → question (choice/noul/score), ≤32. One request per point, so each point sees the full state under its own 16,384-token context budget instead of sharing one request's budget.
 - `--goal-file`: exactly one question, the final verdict. Its state is the original state plus the per-point verdicts, each rendered as `point_id -> verdict`.
 - `--final-panel`: the goal goes to the full tribunal (one judge, one vote, majority wins); a tie re-runs once, a second tie exits 2. Without it, the goal goes to `--judge` (default `clef`).
-- Expansion uses `--judge`/`--model`; with `--final-panel` the expansion still uses that judge while the verdict uses all four. `--sot` cannot be combined with `--questions` or `--panel` — contradictory flags fail loudly.
+- Expansion uses `--judge`/`--model`; with `--final-panel` the expansion still uses that judge while the verdict uses all five. `--sot` cannot be combined with `--questions` or `--panel` — contradictory flags fail loudly.
 - A failing point names itself: `[skeleton:<point_id>] <error>`.
 
 Use `--sot` when a gate's evidence is too large for one request's context budget, or when the sub-judgments are genuinely independent and deserve the full state each. When the questions fit one request and share evidence, the plain batched form is cheaper (fewer requests).
@@ -121,14 +123,20 @@ The key follows standard CLI practices — first source found wins:
 ```ini
 # ~/.config/clef-decide/config — KEY=VALUE lines, # comments
 api_key=...
+# subq_api_key=...            # SubQ's own key (or $SUBQ_API_KEY)
 # endpoint=https://...        # override the SystemOne endpoint (https:// only)
 # luna_endpoint=https://...   # override the decisions endpoint (https:// only)
+# subq_endpoint=https://...   # override the SubQ endpoint (https:// only)
 ```
 
 The SystemOne endpoint is likewise overridable: `--endpoint` flag → `$CLEF_ENDPOINT`
 → config file → default `https://api.experientiallabs.ai/v1/systemone`.
 Luna's decisions endpoint: `--luna-endpoint` flag → `$LUNA_ENDPOINT`
 → config file → default `https://api.experientiallabs.ai/v1/decisions`.
+SubQ's endpoint: `$SUBQ_ENDPOINT` → config file → default
+`https://api.subq.ai/v1/systemone`. SubQ's key chain is separate:
+`$SUBQ_API_KEY` → `subq_api_key=` in the config file; the Experiential key
+is never consulted for the SubQ judge.
 Missing key everywhere stops the helper with setup instructions — it never
 prompts, never logs.
 
@@ -144,13 +152,17 @@ harnesses auto-discover.
 
 - POSTs only to the configured endpoints: SystemOne (default
   `https://api.experientiallabs.ai/v1/systemone`) for clef/clef-flash/jev,
-  decisions (default `https://api.experientiallabs.ai/v1/decisions`) for Luna.
+  decisions (default `https://api.experientiallabs.ai/v1/decisions`) for Luna,
+  SubQ (default `https://api.subq.ai/v1/systemone`) for SubQ.
   No other endpoints.
-- Bearer key comes from the standard config chain above, shared by all four
-  judges. Missing key stops the helper — it never prompts, never logs.
+- Bearer key comes from the standard config chain above, shared by Clef,
+  Clef Flash, Jev, and Luna. SubQ uses its own key chain (`$SUBQ_API_KEY` or
+  `subq_api_key=` in the config file) and never consults the Experiential
+  key. Missing key stops the helper — it never prompts, never logs.
 - SystemOne model is sent as `clef`, `clef-flash`, or `jev-latest` exactly
   (a `:free` suffix spelling is preserved if explicitly selected). Luna's model
-  is fixed (`gpt-6-luna-decisions`). Anything else is rejected.
+  is fixed (`gpt-6-luna-decisions`); SubQ's is fixed (`subq-snap-preview`).
+  Anything else is rejected.
 - **No retries, no idempotency key.** An unknown outcome may already be charged, so the helper never re-sends on its own. (A panel tie triggers one fresh vote round, not a retried request.)
 - Context budget: 16,384 tokens shared by state + question definitions. Over budget is refused before sending.
 - Gateway bounds: ≤32 questions per request, ≤64 options per choice, 2–10 levels per score.
@@ -164,7 +176,7 @@ Fully mocked — no network, no key, no charges:
 python3 -m unittest discover -s tests
 ```
 
-72 tests cover request shape, key handling, context budget, gateway bounds, judge routing, the Luna decisions route, panel voting, skeleton-of-judgment, flag conflicts, and error surfacing. Live calls are always opt-in: ask before any potentially charged call, and never claim it worked without a real response.
+79 tests cover request shape, key handling, context budget, gateway bounds, judge routing, the Luna decisions route, the SubQ route and its key isolation, panel voting, skeleton-of-judgment, flag conflicts, and error surfacing. Live calls are always opt-in: ask before any potentially charged call, and never claim it worked without a real response.
 
 ## Layout
 
