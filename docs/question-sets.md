@@ -1,7 +1,10 @@
-# Clef question sets for the quality loop
+# Panel question sets for the quality loop
 
-Use these verbatim, filling in the IDs. State shapes are suggestions —
-keep state concise (diffs, summaries, records, reports), never the repo.
+Use these verbatim, filling in the IDs. The sets are judge-agnostic: any
+judge on the panel (Clef, Clef Flash, Jev, Luna) can answer any set, and
+the default judge table below assigns each gate to its best-fit judge.
+State shapes are suggestions — keep state concise (diffs, summaries,
+records, reports), never the repo.
 
 Call pattern:
 
@@ -26,7 +29,7 @@ high-stakes calls.
 | 2 risk triage | `risk_<F-ID>` (score) | `jev` | risk scoring is Jev's home turf |
 | 3 triage | `triage_<T-ID>` (choice) | `clef-flash` | high-volume three-way classification |
 | 3 severity | `severity_<D-ID>` (choice) | `clef` | severity needs the thorough reader |
-| 4 fix review | `fix_review_<D-ID>` (choice) | `clef` | fix approval stays with Clef |
+| 4 fix review | `fix_review_<D-ID>` (choice) | `clef` | the thorough reader reviews the diff |
 | 4 fix audit | (record) | `luna` | scored audit appended to the iteration report |
 | 5 regression | `regression_clean` (noul) | `clef-flash` | fast re-verdict |
 | 5 adversarial | `slipped_<area>` (choice) | `jev` | "what could still be broken?" |
@@ -188,6 +191,9 @@ New failures become new D-IDs and go back to Phase 3.
 
 ## Phase 6 — loop control (independent — same request is fine)
 
+Single-judge form: `confidence` and `done` in one request to one judge.
+For the termination verdict itself, prefer the panel variant below.
+
 State: the iteration report — `{coverage_summary, features_tested,
 defects_found[], defects_fixed[], remaining_risks[], sheet_summary:
 {open_critical, open_high, failing_tests, undocumented_features}}`.
@@ -216,7 +222,7 @@ defects_found[], defects_fixed[], remaining_risks[], sheet_summary:
 }
 ```
 
-If `done` is false, loop back to Phase 1. If Clef refuses `done`,
+If `done` is false, loop back to Phase 1. If the gate refuses `done`,
 keep trying: re-run the verdict; if the refusal is stable, strengthen
 the work (more discovery, more fixes) and re-ask. The sheet must agree
 mechanically — both must say go before anything is called done.

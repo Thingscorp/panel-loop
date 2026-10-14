@@ -58,11 +58,11 @@ route; her scored audit goes into the iteration report. Rules for every call:
   severity in the next call with the triage outcome in state).
 - Read answers by question ID (`answers.<id>`). Probabilities and
   confidence are estimates, not guarantees.
-- Clef is stochastic. If Clef doesn't approve, keep trying: re-run the
-  verdict; if the refusal is stable across runs, strengthen the work or
-  the evidence and re-run. Never bypass a failed gate silently, and never
-  merge, ship, or close on a refused gate without the owner's explicit
-  order.
+- The judges are stochastic. If a gate doesn't approve, keep trying:
+  re-run the verdict; if the refusal is stable across runs, strengthen
+  the work or the evidence and re-run. Never bypass a failed gate
+  silently, and never merge, ship, or close on a refused gate without
+  the owner's explicit order.
 - When a gate's evidence is too large for one request's context budget, or
   its sub-judgments are genuinely independent, use `--sot`: you propose
   the skeleton (one file, point ID → question), each point is judged in
@@ -120,8 +120,8 @@ the sheet first.
 ## Output Contract
 
 - The sheet: current after every fact change. It is the handoff.
-- Per iteration: the 6-part report + Clef's confidence and `done`
-  verdict with their probabilities.
+- Per iteration: the 6-part report + the panel's confidence score and
+  `done` verdict with their probabilities.
 - Nothing reaches the owner as "done" without the `done` gate passing
   on the exact sheet state.
 
@@ -129,7 +129,7 @@ the sheet first.
 
 1. One phase — or one surface — per session. The next session starts
    from the sheet, not the transcript.
-2. The agent never substitutes its own judgment for a gated Clef
+2. The agent never substitutes its own judgment for a gated panel
    verdict.
 3. No fake evals: a case that didn't run the production path stays
    `tests-written`, never `tested`.

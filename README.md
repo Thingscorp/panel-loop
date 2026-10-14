@@ -164,7 +164,7 @@ Fully mocked — no network, no key, no charges:
 python3 -m unittest discover -s tests
 ```
 
-55 tests cover request shape, key handling, context budget, gateway bounds, judge routing, the Luna decisions route, panel voting, flag conflicts, and error surfacing. Live calls are always opt-in: ask before any potentially charged call, and never claim it worked without a real response.
+72 tests cover request shape, key handling, context budget, gateway bounds, judge routing, the Luna decisions route, panel voting, skeleton-of-judgment, flag conflicts, and error surfacing. Live calls are always opt-in: ask before any potentially charged call, and never claim it worked without a real response.
 
 ## Layout
 
@@ -173,7 +173,8 @@ python3 -m unittest discover -s tests
 - `docs/quality-loop.md` — the six-phase workflow in full.
 - `docs/question-sets.md` — copy-paste question sets per phase, with state shapes.
 - `examples/launch-readiness/` — worked example: a launch-readiness gate.
-- `tests/` — the mocked test suite (`test_clef_mock.py`, `test_claims.py`, `test_config.py`, `test_judges.py`).
+- `llms.txt` — the short machine-readable summary for LLMs and agents.
+- `tests/` — the mocked test suite (`test_clef_mock.py`, `test_claims.py`, `test_config.py`, `test_judges.py`, `test_sot.py`).
 
 ## License
 
